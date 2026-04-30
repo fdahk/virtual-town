@@ -295,20 +295,9 @@ class SimulationEngine:
             player.dirty = True
             await self._check_player_environment(player)
 
-        # 4. AI Decision Tick（按游戏分钟间隔）
-        ai_interval = sim.ai_tick_minutes
-        last_dt = max(
-            (a.last_decision_at for a in self._agents.values() if a.last_decision_at is not None),
-            default=None,
-        )
-        should_decide = (
-            last_dt is None
-            or (self._world_time - last_dt).total_seconds() >= ai_interval * 60
-        )
-        if should_decide:
-            await self._decide_all(now_dt)
-            # 决策之后尝试反思 / 日结（只跑几个 agent，避免阻塞）
-            await self._maybe_reflect_batch(now_dt)
+        # 4. AI Decision Tick（每个 Agent 独立按游戏分钟间隔决策）
+        await self._decide_all(now_dt)
+        await self._maybe_reflect_batch(now_dt)
 
         # 5. 汇总 updates
         for agent in self._agents.values():
@@ -352,13 +341,16 @@ class SimulationEngine:
 
         - 未配置 LLM（LLM_ENABLED=false 或无 key）：全部走规则版。
         - 配置 LLM：每个需要决策的 Agent 先尝试 LLM，失败或返回空路径时回退规则版。
+        - 每个 Agent 独立按 ai_tick_minutes 游戏分钟间隔决策，避免全局时钟相互阻塞。
         - Engine 主循环必须永不因 LLM 而卡住；单个 Agent 决策用独立 session 完成，
           异常被吞掉并改用规则决策，保证小镇持续运行。
+        - LLM 工具全部失败时（无 success=True 结果），视为 LLM 失败，回退规则版。
         """
         from app.core.config import get_settings
         from app.llm.agent_decision import decide_with_llm
 
         llm_enabled = get_settings().llm_is_configured
+        ai_interval = self._simulation.ai_tick_minutes if self._simulation else 5
         grids = {
             sid: g
             for sid in get_scene_cache().all_scene_ids()
@@ -371,6 +363,12 @@ class SimulationEngine:
             if agent.state in {"CHATTING", "SLEEPING"}:
                 continue
             if agent.path:
+                continue
+            # 每个 Agent 独立检查自身的决策冷却时间
+            if (
+                agent.last_decision_at is not None
+                and (now_dt - agent.last_decision_at).total_seconds() < ai_interval * 60
+            ):
                 continue
             meta = self._agents_meta.get(agent.id)
             if meta is None:
@@ -388,24 +386,31 @@ class SimulationEngine:
                         )
                         await llm_session.commit()
                         if results is not None:
-                            agent.last_decision_at = now_dt
-                            agent.dirty = True
-                            applied = True
-                            # 执行成功但工具未改变 path（比如 wait）：保证状态合理
-                            if not agent.path and agent.state == "IDLE":
-                                agent.state = "WAITING"
-                            self._pending_events.append(
-                                _new_event(
-                                    simulation_id=self._sim_id(),
-                                    event_type="llm.task_finished",
-                                    actor_entity_id=agent.id,
-                                    scene_id=agent.scene_id,
-                                    description=f"{agent.name}：LLM 决策完成",
-                                    importance=1,
-                                    payload={"results": [r.model_dump() for r in results]},
-                                    created_at=utcnow(),
+                            # 只有至少一个工具成功，才视为 LLM 决策生效；
+                            # 全部失败（如 TARGET_NOT_REACHABLE）则回退规则版。
+                            any_success = any(r.success for r in results)
+                            if any_success:
+                                agent.last_decision_at = now_dt
+                                agent.dirty = True
+                                applied = True
+                                if not agent.path and agent.state == "IDLE":
+                                    agent.state = "WAITING"
+                                self._pending_events.append(
+                                    _new_event(
+                                        simulation_id=self._sim_id(),
+                                        event_type="llm.task_finished",
+                                        actor_entity_id=agent.id,
+                                        scene_id=agent.scene_id,
+                                        description=f"{agent.name}：LLM 决策完成",
+                                        importance=1,
+                                        payload={"results": [r.model_dump() for r in results]},
+                                        created_at=utcnow(),
+                                    )
                                 )
-                            )
+                            else:
+                                logger.warning(
+                                    "LLM tools all failed for %s; fallback to rule", agent.id
+                                )
                 except Exception:
                     logger.exception("LLM decision failed for %s; fallback to rule", agent.id)
 
@@ -434,6 +439,7 @@ class SimulationEngine:
                         world_time=now_dt,
                         locations=self._locations,
                         grids=grids,
+                        portals_by_scene=self._portals_by_scene,
                     )
             except Exception:
                 logger.exception("decide failed for %s", agent.id)
@@ -454,7 +460,9 @@ class SimulationEngine:
         elif decision.action_type == "sleep":
             agent.state = "SLEEPING"
         elif decision.action_type == "wait":
-            agent.state = "IDLE"
+            # WAITING 与 IDLE 区分：WAITING 表示主动等待或暂时受阻，
+            # IDLE 保留给初始/空闲状态，避免卡死的 NPC 外观与正常空闲混淆
+            agent.state = "WAITING"
         else:
             agent.state = "INTERACTING"
         self._pending_events.append(

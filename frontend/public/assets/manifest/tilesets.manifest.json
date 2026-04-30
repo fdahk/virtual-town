@@ -33,6 +33,8 @@
     "grocery_door": 78,
     "flower_door": 74,
     "fence": 81,
+    "home_ext": 48,
+    "home_door": 76,
     "river": 255,
     "water": 255
   },

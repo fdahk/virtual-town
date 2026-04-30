@@ -51,6 +51,16 @@ GROCERY_ID = "scene_grocery_inside"
 OUTDOOR_W, OUTDOOR_H = 40, 30
 INDOOR_W, INDOOR_H = 16, 12
 
+# 6 处 NPC 住宅室内场景 ID
+HOME_SCENE_IDS: dict[str, str] = {
+    "xiaofang": "scene_home_xiaofang_inside",
+    "xiaoming": "scene_home_xiaoming_inside",
+    "xiaowang": "scene_home_xiaowang_inside",
+    "linna":    "scene_home_linna_inside",
+    "chenbo":   "scene_home_chenbo_inside",
+    "ayan":     "scene_home_ayan_inside",
+}
+
 
 # ----------------------------------------------------------------------
 # 地图构造
@@ -69,11 +79,18 @@ def build_outdoor_tiles() -> list[dict[str, Any]]:
     - 水平道路：y=14, 15
     - 河流：y=5（宽 2 格），x 从 0 到 40；x in [12..16] 为桥（walkable，无危险）
     - 河流边 y=4 有护栏对象（由 world_objects 表表达），其余区域可直接落水
-    - 四个建筑位置：
+    - 四个公共建筑：
         咖啡店 bounds (4-9, 18-22)，入口 (6, 22)
         学校   bounds (24-33, 17-23)，入口 (28, 23)
         杂货店 bounds (30-35, 6-10)，入口 (32, 10)
-        花店   bounds (4-8, 8-11)，入口（装饰，非 portal，单场景即可）
+        花店   bounds (4-8, 8-11)，入口 (6, 11)
+    - 六处 NPC 住宅（home_ext）：
+        小芳家   blocks (1-4,  24-26)，门 (3, 26)，入口 (3, 27)
+        小明家   blocks (10-13,24-26)，门 (12,26)，入口 (12,27)
+        小王家   blocks (12-15, 7- 9)，门 (14, 9)，入口 (14,10)
+        林娜家   blocks (33-36,24-26)，门 (35,26)，入口 (35,27)
+        陈伯家   blocks (36-38,10-11)，门 (37,11)，入口 (37,12)  ← 避开 y=14 道路
+        阿言家   blocks (1- 3, 11-12)，门 (2, 12)，入口 (2, 13)
     """
     tiles: list[dict[str, Any]] = []
     # 初始化整张地图为草地
@@ -149,6 +166,21 @@ def build_outdoor_tiles() -> list[dict[str, Any]]:
     # 花店（装饰）
     block_rect(4, 8, 8, 11, "flower_ext")
     set_tile(6, 11, terrain="flower_door", walkable=True, blocks_movement=False, tags=["entry"])
+
+    # NPC 住宅（6 处）：(x0, y0, x1, y1, door_x, door_y)
+    # door 在建筑底行中心，设为 walkable；入口格在 door 正下方一格
+    npc_homes = [
+        (1,  24, 4,  26, 3,  26),  # 小芳家
+        (10, 24, 13, 26, 12, 26),  # 小明家
+        (12, 7,  15, 9,  14, 9),   # 小王家
+        (33, 24, 36, 26, 35, 26),  # 林娜家
+        (36, 10, 38, 11, 37, 11),  # 陈伯家（避开 y=14 道路）
+        (1,  11, 3,  12, 2,  12),  # 阿言家
+    ]
+    for x0, y0, x1, y1, door_x, door_y in npc_homes:
+        block_rect(x0, y0, x1, y1, "home_ext")
+        set_tile(door_x, door_y, terrain="home_door", walkable=True, blocks_movement=False, tags=["entry"])
+
     return tiles
 
 
@@ -160,9 +192,9 @@ def build_indoor_tiles(
     - 外圈为墙（blocks_movement）
     - 内部为地板（可走）
     - 家具由 world_objects 添加，不改动 tile
-    - 入口 tile 在 (tile_x, 11)
+    - 入口 tile 在 (entry_x, 11)
     """
-    entry_x = {"cafe": 7, "school": 7, "grocery": 7}[kind]
+    entry_x = {"cafe": 7, "school": 7, "grocery": 7, "home": 7}[kind]
     tiles: list[dict[str, Any]] = []
     for y in range(INDOOR_H):
         for x in range(INDOOR_W):
@@ -269,7 +301,29 @@ def seed(session: Session, *, force: bool = True) -> None:
         tile_size=32,
         description="货架琳琅满目的小杂货铺，陈伯在这里守了很多年。",
     )
-    session.add_all([outdoor, cafe, school, grocery])
+    # 6 处 NPC 住宅室内场景
+    home_scene_meta: dict[str, tuple[str, str]] = {
+        "xiaofang": ("小芳家·卧室",   "小芳的温馨小屋，窗台上摆着盆栽，桌上有诗集。"),
+        "xiaoming": ("小明家·书房",   "小明的房间，书桌上堆满教科书和草稿纸。"),
+        "xiaowang": ("小王家·工作室", "小王的公寓，显示器常亮，键盘旁有一杯凉咖啡。"),
+        "linna":    ("林娜家·卧室",   "林娜的家，简洁整洁，医学书摆满了角落的书架。"),
+        "chenbo":   ("陈伯家·厅堂",   "陈伯家，老式家具，墙上挂着旧照片和杂货店的货单。"),
+        "ayan":     ("阿言家·花房",   "阿言的小屋，到处都是花盆和猫咪玩具，花香扑鼻。"),
+    }
+    home_scenes: dict[str, MapScene] = {}
+    for key, (scene_name, scene_desc) in home_scene_meta.items():
+        hs = MapScene(
+            id=HOME_SCENE_IDS[key],
+            name=scene_name,
+            scene_type="indoor",
+            width=INDOOR_W,
+            height=INDOOR_H,
+            tile_size=32,
+            description=scene_desc,
+        )
+        home_scenes[key] = hs
+
+    session.add_all([outdoor, cafe, school, grocery, *home_scenes.values()])
     session.flush()
 
     for t in build_outdoor_tiles():
@@ -280,6 +334,9 @@ def seed(session: Session, *, force: bool = True) -> None:
         session.add(MapTile(scene_id=school.id, **t))
     for t in build_indoor_tiles("grocery"):
         session.add(MapTile(scene_id=grocery.id, **t))
+    for key, hs in home_scenes.items():
+        for t in build_indoor_tiles("home"):
+            session.add(MapTile(scene_id=hs.id, **t))
 
     # ------------------ Locations ------------------
     cafe_loc = Location(
@@ -371,9 +428,9 @@ def seed(session: Session, *, force: bool = True) -> None:
     homes = {
         "xiaofang": ("loc_home_xiaofang", {"x": 1, "y": 24, "width": 4, "height": 3}, "小芳的家"),
         "xiaoming": ("loc_home_xiaoming", {"x": 10, "y": 24, "width": 4, "height": 3}, "小明家"),
-        "xiaowang": ("loc_home_xiaowang", {"x": 25, "y": 1, "width": 4, "height": 3}, "小王家"),
+        "xiaowang": ("loc_home_xiaowang", {"x": 12, "y": 7, "width": 4, "height": 3}, "小王家"),
         "linna":    ("loc_home_linna",    {"x": 33, "y": 24, "width": 4, "height": 3}, "林娜家"),
-        "chenbo":   ("loc_home_chenbo",   {"x": 36, "y": 12, "width": 3, "height": 2}, "陈伯家"),
+        "chenbo":   ("loc_home_chenbo",   {"x": 36, "y": 10, "width": 3, "height": 2}, "陈伯家"),
         "ayan":     ("loc_home_ayan",     {"x": 1,  "y": 11, "width": 3, "height": 2}, "阿言家"),
     }
     all_locs = [
@@ -383,6 +440,10 @@ def seed(session: Session, *, force: bool = True) -> None:
         flower_loc, river_bench, park,
     ]
     for key, (loc_id, bounds, name) in homes.items():
+        door_y = bounds["y"] + bounds["height"] - 1   # 建筑底行（walkable door tile）
+        entry_y = bounds["y"] + bounds["height"]       # 门外一格
+        door_x = bounds["x"] + bounds["width"] // 2
+        # 室外 Location（建筑外壳 + 入口格）
         all_locs.append(
             Location(
                 id=loc_id,
@@ -390,8 +451,20 @@ def seed(session: Session, *, force: bool = True) -> None:
                 name=name,
                 location_type="building",
                 bounds=bounds,
-                entry_tiles=[{"x": bounds["x"] + bounds["width"] // 2, "y": bounds["y"] + bounds["height"]}],
+                entry_tiles=[{"x": door_x, "y": door_y}],  # 门片格作为入口
                 tags=["home"],
+            )
+        )
+        # 室内 Location（卧室/起居区）
+        all_locs.append(
+            Location(
+                id=f"{loc_id}_interior",
+                scene_id=HOME_SCENE_IDS[key],
+                name=f"{name}（室内）",
+                location_type="room",
+                bounds={"x": 1, "y": 1, "width": 14, "height": 10},
+                entry_tiles=[{"x": 7, "y": 8}],   # 室内中央区域
+                tags=["home_interior", "rest"],
             )
         )
     session.add_all(all_locs)
@@ -460,6 +533,32 @@ def seed(session: Session, *, force: bool = True) -> None:
             name="杂货店门（出）",
         ),
     ]
+    # 6 处 NPC 住宅传送门（进 + 出各 1，共 12 个）
+    for key, (loc_id, bounds, name) in homes.items():
+        door_x = bounds["x"] + bounds["width"] // 2
+        door_y = bounds["y"] + bounds["height"] - 1   # 室外门片格
+        entry_y = bounds["y"] + bounds["height"]       # 室外门外一格（返回落点）
+        home_scene = home_scenes[key]
+        portals.append(Portal(
+            id=f"portal_home_{key}_in",
+            from_scene_id=outdoor.id,
+            from_tile={"x": door_x, "y": door_y},
+            to_scene_id=home_scene.id,
+            to_tile={"x": 7, "y": 9},
+            interaction_type="auto_enter",
+            requires_permission=False,
+            name=f"{name}·进门",
+        ))
+        portals.append(Portal(
+            id=f"portal_home_{key}_out",
+            from_scene_id=home_scene.id,
+            from_tile={"x": 7, "y": 11},
+            to_scene_id=outdoor.id,
+            to_tile={"x": door_x, "y": entry_y},
+            interaction_type="auto_enter",
+            requires_permission=False,
+            name=f"{name}·出门",
+        ))
     session.add_all(portals)
 
     # ------------------ World objects ------------------
@@ -551,6 +650,58 @@ def seed(session: Session, *, force: bool = True) -> None:
             )
         )
 
+    # 6 处 NPC 住宅室内家具
+    # (name, x, y, w, h, blocks, interactions, object_type, tags)
+    home_furniture_templates: dict[str, list[tuple]] = {
+        "xiaofang": [
+            ("床",   5, 2, 3, 2, True,  ["sleep", "inspect"], "furniture", ["bed"]),
+            ("书桌", 10, 2, 2, 1, True,  ["inspect"],          "furniture", ["desk"]),
+            ("书架", 2,  4, 1, 3, True,  ["inspect"],          "furniture", ["bookshelf"]),
+        ],
+        "xiaoming": [
+            ("床",   3, 2, 3, 2, True,  ["sleep", "inspect"], "furniture", ["bed"]),
+            ("书桌", 8,  2, 3, 1, True,  ["study", "inspect"], "furniture", ["desk"]),
+            ("书架", 12, 3, 1, 4, True,  ["inspect"],          "furniture", ["bookshelf"]),
+        ],
+        "xiaowang": [
+            ("床",     3, 2, 3, 2, True,  ["sleep", "inspect"],          "furniture", ["bed"]),
+            ("工作台", 8, 2, 4, 1, True,  ["work", "use_computer", "inspect"], "facility", ["desk"]),
+            ("椅子",   9, 3, 1, 1, False, ["sit", "inspect"],             "furniture", ["chair"]),
+        ],
+        "linna": [
+            ("床",   5, 2, 3, 2, True,  ["sleep", "inspect"], "furniture", ["bed"]),
+            ("书架", 2, 2, 1, 5, True,  ["inspect"],          "furniture", ["bookshelf"]),
+            ("桌子", 10, 5, 2, 1, True,  ["inspect"],          "furniture", ["table"]),
+        ],
+        "chenbo": [
+            ("床",     3, 2, 3, 2, True,  ["sleep", "inspect"], "furniture", ["bed"]),
+            ("老椅子", 9, 4, 1, 1, False, ["sit", "inspect"],   "furniture", ["chair"]),
+            ("茶桌",   8, 3, 2, 1, True,  ["inspect"],          "furniture", ["table"]),
+        ],
+        "ayan": [
+            ("床",   3, 2, 3, 2, True,  ["sleep", "inspect"], "furniture", ["bed"]),
+            ("花架", 9, 2, 2, 3, True,  ["inspect", "tend"],  "furniture", ["plant"]),
+            ("猫窝", 12, 6, 2, 1, False, ["inspect"],          "furniture", ["pet"]),
+        ],
+    }
+    for key, furniture_list in home_furniture_templates.items():
+        hs = home_scenes[key]
+        for fname, fx, fy, fw, fh, fblk, fints, fotype, ftags in furniture_list:
+            objects.append(
+                WorldObject(
+                    id=_uid(f"obj_home_{key}"),
+                    scene_id=hs.id,
+                    name=fname,
+                    object_type=fotype,
+                    position={"x": fx, "y": fy},
+                    size={"width": fw, "height": fh},
+                    blocks_movement=fblk,
+                    available_interactions=fints,
+                    state={},
+                    tags=["home"] + ftags,
+                )
+            )
+
     session.add_all(objects)
 
     # ------------------ Agents ------------------
@@ -569,13 +720,13 @@ def seed(session: Session, *, force: bool = True) -> None:
                 "home_location_id": "loc_home_xiaofang",
                 "appearance": {"sprite_sheet": "npc_xiaofang", "color": "#ffadc2", "scale": 1.0},
                 "schedule_template": [
-                    {"start": "00:00", "end": "07:00", "activity": "sleep", "location_id": "loc_home_xiaofang", "description": "在家睡觉"},
-                    {"start": "07:00", "end": "08:00", "activity": "morning", "location_id": "loc_home_xiaofang", "description": "准备上班"},
-                    {"start": "08:00", "end": "12:00", "activity": "work", "location_id": "loc_hobbs_cafe_interior", "description": "在咖啡店冲咖啡"},
-                    {"start": "12:00", "end": "13:00", "activity": "lunch", "location_id": "loc_hobbs_cafe_interior", "description": "在店里吃午饭"},
-                    {"start": "13:00", "end": "19:00", "activity": "work", "location_id": "loc_hobbs_cafe_interior", "description": "下午继续服务客人"},
-                    {"start": "19:00", "end": "21:00", "activity": "relax", "location_id": "loc_river_bench", "description": "去河边散步"},
-                    {"start": "21:00", "end": "24:00", "activity": "home", "location_id": "loc_home_xiaofang", "description": "回家休息"},
+                    {"start": "00:00", "end": "07:00", "activity": "sleep",   "location_id": "loc_home_xiaofang_interior", "description": "在家睡觉"},
+                    {"start": "07:00", "end": "08:00", "activity": "morning", "location_id": "loc_home_xiaofang_interior", "description": "准备上班"},
+                    {"start": "08:00", "end": "12:00", "activity": "work",    "location_id": "loc_hobbs_cafe_interior", "description": "在咖啡店冲咖啡"},
+                    {"start": "12:00", "end": "13:00", "activity": "lunch",   "location_id": "loc_hobbs_cafe_interior", "description": "在店里吃午饭"},
+                    {"start": "13:00", "end": "19:00", "activity": "work",    "location_id": "loc_hobbs_cafe_interior", "description": "下午继续服务客人"},
+                    {"start": "19:00", "end": "21:00", "activity": "relax",   "location_id": "loc_river_bench", "description": "去河边散步"},
+                    {"start": "21:00", "end": "24:00", "activity": "home",    "location_id": "loc_home_xiaofang_interior", "description": "回家休息"},
                 ],
                 "home": "loc_home_xiaofang",
             },
@@ -593,13 +744,13 @@ def seed(session: Session, *, force: bool = True) -> None:
                 "home_location_id": "loc_home_xiaoming",
                 "appearance": {"sprite_sheet": "npc_xiaoming", "color": "#8cc0ff", "scale": 1.0},
                 "schedule_template": [
-                    {"start": "00:00", "end": "07:00", "activity": "sleep", "location_id": "loc_home_xiaoming"},
-                    {"start": "07:00", "end": "08:00", "activity": "breakfast", "location_id": "loc_home_xiaoming"},
-                    {"start": "08:00", "end": "16:00", "activity": "school", "location_id": "loc_school_interior", "description": "在教室上课"},
-                    {"start": "16:00", "end": "18:00", "activity": "study", "location_id": "loc_hobbs_cafe_interior", "description": "在咖啡店做作业"},
-                    {"start": "18:00", "end": "19:00", "activity": "dinner", "location_id": "loc_home_xiaoming"},
-                    {"start": "19:00", "end": "21:00", "activity": "play", "location_id": "loc_park"},
-                    {"start": "21:00", "end": "24:00", "activity": "home", "location_id": "loc_home_xiaoming"},
+                    {"start": "00:00", "end": "07:00", "activity": "sleep",     "location_id": "loc_home_xiaoming_interior"},
+                    {"start": "07:00", "end": "08:00", "activity": "breakfast", "location_id": "loc_home_xiaoming_interior"},
+                    {"start": "08:00", "end": "16:00", "activity": "school",    "location_id": "loc_school_interior", "description": "在教室上课"},
+                    {"start": "16:00", "end": "18:00", "activity": "study",     "location_id": "loc_hobbs_cafe_interior", "description": "在咖啡店做作业"},
+                    {"start": "18:00", "end": "19:00", "activity": "dinner",    "location_id": "loc_home_xiaoming_interior"},
+                    {"start": "19:00", "end": "21:00", "activity": "play",      "location_id": "loc_park"},
+                    {"start": "21:00", "end": "24:00", "activity": "home",      "location_id": "loc_home_xiaoming_interior"},
                 ],
                 "home": "loc_home_xiaoming",
             },
@@ -617,13 +768,13 @@ def seed(session: Session, *, force: bool = True) -> None:
                 "home_location_id": "loc_home_xiaowang",
                 "appearance": {"sprite_sheet": "npc_xiaowang", "color": "#8cffd1", "scale": 1.0},
                 "schedule_template": [
-                    {"start": "00:00", "end": "08:00", "activity": "sleep", "location_id": "loc_home_xiaowang"},
-                    {"start": "08:00", "end": "12:00", "activity": "work_from_home", "location_id": "loc_home_xiaowang", "description": "在家写代码"},
-                    {"start": "12:00", "end": "13:00", "activity": "coffee", "location_id": "loc_hobbs_cafe_interior", "description": "去咖啡店买美式"},
-                    {"start": "13:00", "end": "18:00", "activity": "work_from_home", "location_id": "loc_home_xiaowang"},
-                    {"start": "18:00", "end": "19:30", "activity": "dinner", "location_id": "loc_grocery_interior", "description": "去杂货店买食材"},
-                    {"start": "19:30", "end": "22:00", "activity": "gym", "location_id": "loc_park", "description": "去广场锻炼"},
-                    {"start": "22:00", "end": "24:00", "activity": "home", "location_id": "loc_home_xiaowang"},
+                    {"start": "00:00", "end": "08:00", "activity": "sleep",          "location_id": "loc_home_xiaowang_interior"},
+                    {"start": "08:00", "end": "12:00", "activity": "work_from_home", "location_id": "loc_home_xiaowang_interior", "description": "在家写代码"},
+                    {"start": "12:00", "end": "13:00", "activity": "coffee",         "location_id": "loc_hobbs_cafe_interior", "description": "去咖啡店买美式"},
+                    {"start": "13:00", "end": "18:00", "activity": "work_from_home", "location_id": "loc_home_xiaowang_interior"},
+                    {"start": "18:00", "end": "19:30", "activity": "dinner",         "location_id": "loc_grocery_interior", "description": "去杂货店买食材"},
+                    {"start": "19:30", "end": "22:00", "activity": "gym",            "location_id": "loc_park", "description": "去广场锻炼"},
+                    {"start": "22:00", "end": "24:00", "activity": "home",           "location_id": "loc_home_xiaowang_interior"},
                 ],
                 "home": "loc_home_xiaowang",
             },
@@ -641,13 +792,13 @@ def seed(session: Session, *, force: bool = True) -> None:
                 "home_location_id": "loc_home_linna",
                 "appearance": {"sprite_sheet": "npc_linna", "color": "#fff0a1", "scale": 1.0},
                 "schedule_template": [
-                    {"start": "00:00", "end": "07:00", "activity": "sleep", "location_id": "loc_home_linna"},
+                    {"start": "00:00", "end": "07:00", "activity": "sleep",  "location_id": "loc_home_linna_interior"},
                     {"start": "07:00", "end": "08:00", "activity": "coffee", "location_id": "loc_hobbs_cafe_interior", "description": "上班前的咖啡"},
                     {"start": "08:00", "end": "12:00", "activity": "clinic", "location_id": "loc_school_interior", "description": "在诊所看诊（暂借学校）"},
-                    {"start": "12:00", "end": "13:00", "activity": "lunch", "location_id": "loc_hobbs_cafe_interior"},
+                    {"start": "12:00", "end": "13:00", "activity": "lunch",  "location_id": "loc_hobbs_cafe_interior"},
                     {"start": "13:00", "end": "18:00", "activity": "clinic", "location_id": "loc_school_interior"},
-                    {"start": "18:00", "end": "19:00", "activity": "walk", "location_id": "loc_river_bench"},
-                    {"start": "19:00", "end": "24:00", "activity": "home", "location_id": "loc_home_linna"},
+                    {"start": "18:00", "end": "19:00", "activity": "walk",   "location_id": "loc_river_bench"},
+                    {"start": "19:00", "end": "24:00", "activity": "home",   "location_id": "loc_home_linna_interior"},
                 ],
                 "home": "loc_home_linna",
             },
@@ -665,11 +816,11 @@ def seed(session: Session, *, force: bool = True) -> None:
                 "home_location_id": "loc_home_chenbo",
                 "appearance": {"sprite_sheet": "npc_chenbo", "color": "#d9a066", "scale": 1.0},
                 "schedule_template": [
-                    {"start": "00:00", "end": "06:00", "activity": "sleep", "location_id": "loc_home_chenbo"},
-                    {"start": "06:00", "end": "07:00", "activity": "open_shop", "location_id": "loc_grocery_interior", "description": "开店"},
-                    {"start": "07:00", "end": "19:00", "activity": "shopkeep", "location_id": "loc_grocery_interior", "description": "守店"},
-                    {"start": "19:00", "end": "21:00", "activity": "chat", "location_id": "loc_river_bench", "description": "去河边乘凉"},
-                    {"start": "21:00", "end": "24:00", "activity": "home", "location_id": "loc_home_chenbo"},
+                    {"start": "00:00", "end": "06:00", "activity": "sleep",      "location_id": "loc_home_chenbo_interior"},
+                    {"start": "06:00", "end": "07:00", "activity": "open_shop",  "location_id": "loc_grocery_interior", "description": "开店"},
+                    {"start": "07:00", "end": "19:00", "activity": "shopkeep",   "location_id": "loc_grocery_interior", "description": "守店"},
+                    {"start": "19:00", "end": "21:00", "activity": "chat",       "location_id": "loc_river_bench", "description": "去河边乘凉"},
+                    {"start": "21:00", "end": "24:00", "activity": "home",       "location_id": "loc_home_chenbo_interior"},
                 ],
                 "home": "loc_home_chenbo",
             },
@@ -687,11 +838,11 @@ def seed(session: Session, *, force: bool = True) -> None:
                 "home_location_id": "loc_home_ayan",
                 "appearance": {"sprite_sheet": "npc_ayan", "color": "#c8a2ff", "scale": 1.0},
                 "schedule_template": [
-                    {"start": "00:00", "end": "07:00", "activity": "sleep", "location_id": "loc_home_ayan"},
+                    {"start": "00:00", "end": "07:00", "activity": "sleep",   "location_id": "loc_home_ayan_interior"},
                     {"start": "07:00", "end": "09:00", "activity": "morning", "location_id": "loc_river_bench"},
-                    {"start": "09:00", "end": "19:00", "activity": "flower", "location_id": "loc_flower", "description": "在花店照料植物"},
-                    {"start": "19:00", "end": "21:00", "activity": "cafe", "location_id": "loc_hobbs_cafe_interior"},
-                    {"start": "21:00", "end": "24:00", "activity": "home", "location_id": "loc_home_ayan"},
+                    {"start": "09:00", "end": "19:00", "activity": "flower",  "location_id": "loc_flower", "description": "在花店照料植物"},
+                    {"start": "19:00", "end": "21:00", "activity": "cafe",    "location_id": "loc_hobbs_cafe_interior"},
+                    {"start": "21:00", "end": "24:00", "activity": "home",    "location_id": "loc_home_ayan_interior"},
                 ],
                 "home": "loc_home_ayan",
             },
@@ -723,7 +874,7 @@ def seed(session: Session, *, force: bool = True) -> None:
                 "home_location_id": "loc_home_chenbo",
                 "appearance": {"sprite_sheet": "dog_heihei", "color": "#3a3a3a", "scale": 1.0},
                 "scene": OUTDOOR_ID,
-                "position": (36, 11),
+                "position": (37, 12),   # 陈伯家入口格（原 (36,11) 在建筑主体内）
             },
         ),
         (
@@ -768,13 +919,14 @@ def seed(session: Session, *, force: bool = True) -> None:
     session.add(player)
 
     # NPC 落地
+    # 初始位置 = 各自家的入口格（门片正下方 1 格，walkable）
     npc_positions: dict[str, tuple[str, tuple[int, int]]] = {
-        "npc_xiaofang": (OUTDOOR_ID, (2, 25)),
-        "npc_xiaoming": (OUTDOOR_ID, (11, 25)),
-        "npc_xiaowang": (OUTDOOR_ID, (26, 2)),
-        "npc_linna":    (OUTDOOR_ID, (34, 25)),
-        "npc_chenbo":   (OUTDOOR_ID, (36, 13)),
-        "npc_ayan":     (OUTDOOR_ID, (2, 12)),
+        "npc_xiaofang": (OUTDOOR_ID, (3,  27)),   # 小芳家门口 (3,26) 入口 (3,27)
+        "npc_xiaoming": (OUTDOOR_ID, (12, 27)),   # 小明家
+        "npc_xiaowang": (OUTDOOR_ID, (14, 10)),   # 小王家
+        "npc_linna":    (OUTDOOR_ID, (35, 27)),   # 林娜家
+        "npc_chenbo":   (OUTDOOR_ID, (37, 12)),   # 陈伯家
+        "npc_ayan":     (OUTDOOR_ID, (2,  13)),   # 阿言家
     }
 
     for agent_id, name, data in humans:
