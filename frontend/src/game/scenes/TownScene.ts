@@ -85,9 +85,15 @@ export class TownScene extends Phaser.Scene {
   private unsubscribeBus: (() => void) | null = null;
   private cursorKeys?: Phaser.Types.Input.Keyboard.CursorKeys;
   private lastMoveAt = 0;
+  private _onCreateCallback?: () => void;
 
   constructor() {
     super("TownScene");
+  }
+
+  /** Register a callback to be invoked at the end of create(). */
+  setCreateCallback(cb: () => void): void {
+    this._onCreateCallback = cb;
   }
 
   create(): void {
@@ -112,6 +118,10 @@ export class TownScene extends Phaser.Scene {
     this.events.once(Phaser.Scenes.Events.SHUTDOWN, () => {
       this.unsubscribeBus?.();
     });
+
+    // Notify PhaserGame that the scene is fully initialised and ready to
+    // receive data (all containers exist at this point).
+    this._onCreateCallback?.();
   }
 
   loadDataset(dataset: SceneDataset): void {

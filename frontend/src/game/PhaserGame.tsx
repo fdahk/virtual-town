@@ -36,22 +36,21 @@ export function PhaserGame({ onReady }: Props) {
       });
       gameRef.current = game;
 
-      // scene.events (shortcut to sys.events) is only wired up after Phaser
-      // finishes booting (ScenePlugin.boot). Wait for the READY event before
-      // subscribing to scene lifecycle events.
+      // Use a direct callback on TownScene instead of listening to Phaser's
+      // READY→CREATE event chain. The callback is called at the very end of
+      // TownScene.create(), so all containers (tileLayer, agentLayer, …) are
+      // guaranteed to be initialised when onReady() fires.
       //
-      // Guard: React Strict Mode mounts effects twice (mount → cleanup →
-      // mount). Cleanup destroys game1 but its async READY/CREATE events can
-      // still fire. Without the guard, game1's stale onReady() call sets
-      // sceneReady=true; game2's subsequent call is a no-op and the tile-load
-      // effect never re-runs. The guard ensures only the currently active game
-      // (gameRef.current) triggers onReady.
-      game.events.once(Phaser.Core.Events.READY, () => {
+      // Guard: React Strict Mode mounts useEffect twice (mount → cleanup →
+      // remount). Cleanup destroys game1 but Phaser's async boot can still
+      // complete for the stale game1 instance. Without the guard, onReady()
+      // would be called twice — first for scene1 (stale), which sets
+      // sceneReady=true; then for scene2 (active), which is a no-op dep-wise
+      // and the tile-load effect never re-runs. The guard ensures only the
+      // currently active game triggers onReady.
+      scene.setCreateCallback(() => {
         if (gameRef.current !== game) return;
-        scene.events.once(Phaser.Scenes.Events.CREATE, () => {
-          if (gameRef.current !== game) return;
-          onReady(scene);
-        });
+        onReady(scene);
       });
     };
 
