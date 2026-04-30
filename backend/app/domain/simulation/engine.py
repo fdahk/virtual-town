@@ -115,6 +115,9 @@ class SimulationEngine:
         self._step = 0
         self._pending_events: list[WorldEvent] = []
         self._world_time: datetime = utcnow()
+        # 每个 Agent 上次反思/日结的游戏时间
+        self._last_reflect_at: dict[str, datetime] = {}
+        self._last_summary_day: dict[str, str] = {}
 
     # ------------------------------------------------------------------
     # 生命周期
@@ -304,6 +307,8 @@ class SimulationEngine:
         )
         if should_decide:
             await self._decide_all(now_dt)
+            # 决策之后尝试反思 / 日结（只跑几个 agent，避免阻塞）
+            await self._maybe_reflect_batch(now_dt)
 
         # 5. 汇总 updates
         for agent in self._agents.values():
@@ -342,18 +347,71 @@ class SimulationEngine:
     # ------------------------------------------------------------------
 
     async def _decide_all(self, now_dt: datetime) -> None:
-        grids = {sid: g for sid in get_scene_cache().all_scene_ids() if (g := get_scene_cache().get_grid(sid))}
+        """
+        决策策略：LLM 为主，规则为兜底。
+
+        - 未配置 LLM（LLM_ENABLED=false 或无 key）：全部走规则版。
+        - 配置 LLM：每个需要决策的 Agent 先尝试 LLM，失败或返回空路径时回退规则版。
+        - Engine 主循环必须永不因 LLM 而卡住；单个 Agent 决策用独立 session 完成，
+          异常被吞掉并改用规则决策，保证小镇持续运行。
+        """
+        from app.core.config import get_settings
+        from app.llm.agent_decision import decide_with_llm
+
+        llm_enabled = get_settings().llm_is_configured
+        grids = {
+            sid: g
+            for sid in get_scene_cache().all_scene_ids()
+            if (g := get_scene_cache().get_grid(sid))
+        }
+
         for agent in self._agents.values():
             if agent.is_player:
                 continue
             if agent.state in {"CHATTING", "SLEEPING"}:
                 continue
             if agent.path:
-                # 仍在移动，不重决策
                 continue
             meta = self._agents_meta.get(agent.id)
             if meta is None:
                 continue
+
+            applied = False
+            if llm_enabled:
+                try:
+                    async with self._session_factory() as llm_session:
+                        results = await decide_with_llm(
+                            llm_session,
+                            agent_id=agent.id,
+                            simulation_id=self._sim_id(),
+                            world_time=now_dt,
+                        )
+                        await llm_session.commit()
+                        if results is not None:
+                            agent.last_decision_at = now_dt
+                            agent.dirty = True
+                            applied = True
+                            # 执行成功但工具未改变 path（比如 wait）：保证状态合理
+                            if not agent.path and agent.state == "IDLE":
+                                agent.state = "WAITING"
+                            self._pending_events.append(
+                                _new_event(
+                                    simulation_id=self._sim_id(),
+                                    event_type="llm.task_finished",
+                                    actor_entity_id=agent.id,
+                                    scene_id=agent.scene_id,
+                                    description=f"{agent.name}：LLM 决策完成",
+                                    importance=1,
+                                    payload={"results": [r.model_dump() for r in results]},
+                                    created_at=utcnow(),
+                                )
+                            )
+                except Exception:
+                    logger.exception("LLM decision failed for %s; fallback to rule", agent.id)
+
+            if applied:
+                continue
+
             fake_state = _ORMStateView(agent)
             try:
                 if meta.entity_type == "animal":
@@ -642,6 +700,84 @@ class SimulationEngine:
     async def reload_from_db(self) -> None:
         async with self._session_factory() as session:
             await self._load_state(session)
+
+    # ------------------------------------------------------------------
+    # 反思 / 日结
+    # ------------------------------------------------------------------
+
+    async def _maybe_reflect_batch(self, now_dt: datetime) -> None:
+        """
+        为 1-2 个"累积事件最多"的 Agent 跑反思/日结。
+        - 避免每 tick 全量反思（LLM 成本高）。
+        - 严格守护：任何失败被吞，保证引擎不崩溃。
+        """
+        from app.domain.memory.reflection import maybe_daily_summary, maybe_reflect
+
+        # 每 10 个游戏分钟最多触发一次
+        candidates = [
+            agent
+            for agent in self._agents.values()
+            if not agent.is_player
+            and (
+                agent.id not in self._last_reflect_at
+                or (now_dt - self._last_reflect_at[agent.id]).total_seconds() >= 600
+            )
+        ]
+        if not candidates:
+            return
+        # 取 1 个跑反思 + 尝试所有跑日结（日结内部有 day 粒度去重，廉价）
+        self._rng.shuffle(candidates)
+        target = candidates[0]
+        try:
+            async with self._session_factory() as session:
+                reflections = await maybe_reflect(
+                    session, target.id, world_time=now_dt
+                )
+                if reflections:
+                    self._pending_events.append(
+                        _new_event(
+                            simulation_id=self._sim_id(),
+                            event_type="memory.created",
+                            actor_entity_id=target.id,
+                            scene_id=target.scene_id,
+                            description=f"{target.name} 形成了新的想法：{reflections[0].description[:40]}…",
+                            importance=4,
+                            payload={"reflection_ids": [m.id for m in reflections]},
+                            created_at=utcnow(),
+                        )
+                    )
+                self._last_reflect_at[target.id] = now_dt
+        except Exception:
+            logger.exception("reflection failed for %s", target.id)
+
+        # 日结：一天一次
+        day_key = now_dt.strftime("%Y-%m-%d")
+        for agent in self._agents.values():
+            if agent.is_player:
+                continue
+            if self._last_summary_day.get(agent.id) == day_key:
+                continue
+            try:
+                async with self._session_factory() as session:
+                    mem = await maybe_daily_summary(
+                        session, agent.id, world_time=now_dt
+                    )
+                    if mem is not None:
+                        self._pending_events.append(
+                            _new_event(
+                                simulation_id=self._sim_id(),
+                                event_type="memory.created",
+                                actor_entity_id=agent.id,
+                                scene_id=agent.scene_id,
+                                description=f"{agent.name} 写下了今日总结：{mem.description[:40]}…",
+                                importance=3,
+                                payload={"summary_id": mem.id},
+                                created_at=utcnow(),
+                            )
+                        )
+                        self._last_summary_day[agent.id] = day_key
+            except Exception:
+                logger.exception("daily summary failed for %s", agent.id)
 
 
 class _ORMStateView:

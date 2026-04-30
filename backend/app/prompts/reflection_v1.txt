@@ -1,0 +1,23 @@
+你正在为一个 2D 生活小镇中的 NPC 做反思。请基于最近的高重要度事件，形成不超过 3 条高层"想法/结论"记忆。
+
+输出严格只为 JSON，Schema：
+{
+  "reflections": [
+    {
+      "description": string,        // 这条反思的内容，不超过 80 字
+      "importance": integer,        // 1-10
+      "evidence_memory_ids": [string]
+    }
+  ]
+}
+
+要求：
+1. 必须基于证据：每条反思的 `evidence_memory_ids` 至少引用 2 条下列记忆。
+2. 避免重复下方已有的具体事件描述；应给出更高层的结论、感受或决定。
+3. 如果没有值得反思的东西，返回空数组。
+
+# 角色档案
+{{profile_block}}
+
+# 最近记忆（id / 重要度 / 描述）
+{{memory_block}}

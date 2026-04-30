@@ -1,0 +1,49 @@
+{
+  "version": "1.0",
+  "tilesets": {
+    "kenney_tiny_town": {
+      "id": "kenney_tiny_town",
+      "url": "/assets/tilesets/kenney_tiny_town/tilemap_packed.png",
+      "tile_width": 16,
+      "tile_height": 16,
+      "columns": 12,
+      "rows": 11,
+      "total": 132,
+      "display_scale": 2,
+      "license": "CC0 1.0 Universal",
+      "source": "https://opengameart.org/content/tiny-town",
+      "author": "Kenney"
+    }
+  },
+  "terrain_map": {
+    "grass": 0,
+    "grass_flower": 24,
+    "road": 40,
+    "bridge": 43,
+    "dirt": 37,
+    "tree": 4,
+    "wall": 77,
+    "floor": 37,
+    "cafe_ext": 60,
+    "school_ext": 52,
+    "grocery_ext": 60,
+    "flower_ext": 62,
+    "cafe_door": 77,
+    "school_door": 74,
+    "grocery_door": 78,
+    "flower_door": 74,
+    "fence": 81,
+    "river": 255,
+    "water": 255
+  },
+  "overlay_tiles": {
+    "tree_top_0": 4,
+    "tree_top_1": 6,
+    "tree_top_2": 8,
+    "mushroom": 29,
+    "flowers": 93,
+    "sign": 83,
+    "crate": 94,
+    "barrel": 107
+  }
+}

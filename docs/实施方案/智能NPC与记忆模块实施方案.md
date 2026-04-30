@@ -277,16 +277,19 @@ LLM 不直接返回自然语言行动，而是选择工具。
 
 ## 7. 接口设计
 
-| 方法 | 路径 | 说明 |
-|------|------|------|
-| `GET` | `/api/agents` | 获取 Agent 列表 |
-| `GET` | `/api/agents/{id}` | 获取 Agent 详情 |
-| `PATCH` | `/api/agents/{id}/profile` | 修改初始模型 |
-| `GET` | `/api/agents/{id}/state` | 获取运行状态 |
-| `GET` | `/api/agents/{id}/memories` | 查询记忆 |
-| `GET` | `/api/agents/{id}/relationships` | 查询关系 |
-| `POST` | `/api/agents/{id}/decide` | 手动触发决策 |
-| `POST` | `/api/agents/{id}/memory/search` | 记忆检索 |
+权威接口表与字段定义以 `数据模型与接口契约V1.md` 为准；本节给出本模块视角的概览：
+
+| 方法 | 路径 | 状态 | 说明 |
+|------|------|------|------|
+| `GET` | `/api/agents` | ✅ | 获取 Agent 列表 |
+| `GET` | `/api/agents/{id}` | ✅ | 获取 Agent 详情 |
+| `PATCH` | `/api/agents/{id}/profile` | ✅ | 修改初始模型（部分字段） |
+| `GET` | `/api/agents/{id}/state` | ✅ | 获取运行状态 |
+| `GET` | `/api/agents/{id}/memories` | ✅ | 查询记忆 |
+| `GET` | `/api/agents/{id}/relationships` | ✅ | 查询关系 |
+| `POST` | `/api/agents/{id}/memory/search` | ✅ | 记忆检索（三因素评分） |
+| `POST` | `/api/agents/{id}/reflect` | ✅ 阶段二 | 手动触发反思，返回新写入的 thought |
+| `POST` | `/api/agents/{id}/decide` | ⏸ MVP 不实现 | 手动单步决策；引擎已周期性触发，演示无需此接口 |
 
 ---
 
@@ -294,7 +297,8 @@ LLM 不直接返回自然语言行动，而是选择工具。
 
 1. 初始种子包含 6 个人类 NPC、2 只狗、2 只猫。
 2. 每个 Agent 有初始模型、运行状态、关系网络和记忆。
-3. NPC 行动由 tool calling 结构化输出驱动。
+3. NPC 行动由 tool calling 结构化输出驱动（LLM 优先，规则兜底）。
 4. 动物能自主反应，不只是地图装饰。
-5. 一天结束时能生成 Daily Summary，并处理短期记忆遗忘。
+5. 一天结束（游戏内 22:30 后）能生成 Daily Summary，并处理短期记忆遗忘。
 6. 玩家和 NPC 的互动会影响关系和后续行为。
+7. 反思可通过 `POST /api/agents/{id}/reflect` 手动触发，产出 thought 必须 `evidence_memory_ids` 引用至少 2 条已有事件 / 对话记忆。

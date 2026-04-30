@@ -476,6 +476,14 @@ relevance_weight = 2.0
 - 本方案不把 Phaser 作为世界真相。Phaser 只负责渲染和输入，碰撞、危险、建筑切换、事件触发以后端 World Service 为准。
 - 建筑内部地图是必做能力，通过 Portal 连接室外大地图和室内 scene。
 
+美术资源策略（详见 `视觉资源与美术资产方案.md`）：
+
+- **Kenney · Tiny Town（CC0）** 提供 tileset / 建筑 / 家具；
+- **LPC Universal Spritesheet（CC-BY-SA 3.0 / GPL 3.0）** 提供 4 方向人物/动物 walk 动画；
+- **AI 生成立绘（项目自有）** 提供 NPC 对话头像；
+- MVP tile 尺寸统一为 32×32；
+- 所有外部资源通过 `scripts/fetch_assets.sh` 下载、`CREDITS.md` 登记。
+
 ### 8.2 地图数据结构
 
 地图由三类数据组成：

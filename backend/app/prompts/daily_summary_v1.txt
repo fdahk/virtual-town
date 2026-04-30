@@ -1,0 +1,14 @@
+你正在为 2D 小镇中的 NPC 做每日总结。请基于今天发生的事件、对话和想法，生成一条不超过 140 字的日结。
+
+输出严格只为 JSON：
+{
+  "summary": string,
+  "highlights": [string],    // 3 条以内关键事件
+  "mood": string             // 当天整体情绪词
+}
+
+# 角色档案
+{{profile_block}}
+
+# 今日记忆（按时间顺序）
+{{memory_block}}

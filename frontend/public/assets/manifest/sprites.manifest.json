@@ -1,0 +1,81 @@
+{
+  "version": "1.0",
+  "humans": {
+    "frame_width": 64,
+    "frame_height": 64,
+    "columns": 9,
+    "rows": 4,
+    "display_scale": 0.75,
+    "animations": {
+      "idle_up":    { "frames": [0],                  "frameRate": 1 },
+      "walk_up":    { "frames": [1, 2, 3, 4, 5, 6, 7, 8],  "frameRate": 10 },
+      "idle_left":  { "frames": [9],                  "frameRate": 1 },
+      "walk_left":  { "frames": [10, 11, 12, 13, 14, 15, 16, 17], "frameRate": 10 },
+      "idle_down":  { "frames": [18],                 "frameRate": 1 },
+      "walk_down":  { "frames": [19, 20, 21, 22, 23, 24, 25, 26], "frameRate": 10 },
+      "idle_right": { "frames": [27],                 "frameRate": 1 },
+      "walk_right": { "frames": [28, 29, 30, 31, 32, 33, 34, 35], "frameRate": 10 }
+    },
+    "license": "CC-BY-SA 3.0 / GPL 3.0 (Universal LPC Spritesheet Generator)",
+    "source": "https://github.com/sanderfrenken/Universal-LPC-Spritesheet-Character-Generator",
+    "sheets": {
+      "npc_xiaofang": "/assets/sprites/humans/xiaofang.png",
+      "npc_xiaoming": "/assets/sprites/humans/xiaoming.png",
+      "npc_xiaowang": "/assets/sprites/humans/xiaowang.png",
+      "npc_linna":    "/assets/sprites/humans/linna.png",
+      "npc_chenbo":   "/assets/sprites/humans/chenbo.png",
+      "npc_ayan":     "/assets/sprites/humans/ayan.png",
+      "player_default": "/assets/sprites/humans/player_default.png"
+    }
+  },
+  "cats": {
+    "sheet_url": "/assets/sprites/animals/lpc_cats.png",
+    "frame_width": 32,
+    "frame_height": 32,
+    "display_scale": 1.0,
+    "colors": {
+      "white":  { "col_offset": 0,  "row_offset": 0 },
+      "brown":  { "col_offset": 4,  "row_offset": 0 },
+      "golden": { "col_offset": 8,  "row_offset": 0 },
+      "black":  { "col_offset": 12, "row_offset": 0 }
+    },
+    "direction_rows": {
+      "up":    0,
+      "right": 2,
+      "down":  4,
+      "left":  6
+    },
+    "walk_frame_count": 4,
+    "license": "CC-BY 3.0 / GPL 3.0 / GPL 2.0 / OGA-BY 3.0 (bluecarrot16)",
+    "source": "https://opengameart.org/content/lpc-cats-and-dogs",
+    "assignments": {
+      "animal_mimi":    "brown",
+      "animal_xiaobai": "white"
+    }
+  },
+  "dogs": {
+    "sheet_url": "/assets/sprites/animals/lpc_dogs.png",
+    "frame_width": 32,
+    "frame_height": 32,
+    "display_scale": 1.0,
+    "colors": {
+      "white":  { "col_offset": 0,  "row_offset": 0 },
+      "brown":  { "col_offset": 4,  "row_offset": 0 },
+      "golden": { "col_offset": 8,  "row_offset": 0 },
+      "black":  { "col_offset": 12, "row_offset": 0 }
+    },
+    "direction_rows": {
+      "up":    0,
+      "right": 2,
+      "down":  4,
+      "left":  6
+    },
+    "walk_frame_count": 4,
+    "license": "CC-BY 3.0 / GPL 3.0 / GPL 2.0 / OGA-BY 3.0 (bluecarrot16)",
+    "source": "https://opengameart.org/content/lpc-cats-and-dogs",
+    "assignments": {
+      "animal_doudou": "golden",
+      "animal_heihei": "black"
+    }
+  }
+}

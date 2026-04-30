@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { useWorldStore } from "../stores/worldStore";
 import { api } from "../api";
+import { usePortrait } from "../game/assets/usePortrait";
 
 interface ChatItem {
   side: "me" | "npc";
@@ -17,6 +18,7 @@ export function ChatPanel() {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const inputRef = useRef<HTMLInputElement>(null);
+  const portrait = usePortrait(pending?.targetId ?? null);
 
   useEffect(() => {
     if (pending) {
@@ -69,6 +71,17 @@ export function ChatPanel() {
             ×
           </button>
         </div>
+        <div style={styles.bodyRow}>
+          <div style={styles.portraitCol}>
+            {portrait ? (
+              <img src={portrait} alt={pending.targetName} style={styles.portraitImg} />
+            ) : (
+              <div style={styles.portraitPlaceholder}>
+                <span style={{ fontSize: 12, opacity: 0.65 }}>{pending.targetName}</span>
+              </div>
+            )}
+            <div style={styles.portraitName}>{pending.targetName}</div>
+          </div>
         <div style={styles.body}>
           {messages.length === 0 && (
             <div style={{ opacity: 0.55, fontSize: 13, textAlign: "center", marginTop: 40 }}>
@@ -106,6 +119,7 @@ export function ChatPanel() {
             </div>
           ))}
         </div>
+        </div>
         {error && <div style={styles.error}>{error}</div>}
         <div style={styles.inputRow}>
           <input
@@ -137,16 +151,53 @@ const styles: Record<string, React.CSSProperties> = {
     zIndex: 100,
   },
   panel: {
-    width: 520,
-    maxWidth: "92vw",
-    height: 540,
-    maxHeight: "80vh",
+    width: 680,
+    maxWidth: "94vw",
+    height: 560,
+    maxHeight: "82vh",
     background: "#0e1218",
     borderRadius: 12,
     display: "grid",
-    gridTemplateRows: "auto 1fr auto",
+    gridTemplateRows: "auto 1fr auto auto",
     border: "1px solid rgba(255,255,255,0.08)",
     boxShadow: "0 20px 60px rgba(0,0,0,0.5)",
+  },
+  bodyRow: {
+    display: "grid",
+    gridTemplateColumns: "180px 1fr",
+    gap: 0,
+    overflow: "hidden",
+  },
+  portraitCol: {
+    padding: "14px 12px",
+    borderRight: "1px solid rgba(255,255,255,0.06)",
+    display: "flex",
+    flexDirection: "column",
+    alignItems: "center",
+    gap: 8,
+    background: "rgba(255,255,255,0.02)",
+  },
+  portraitImg: {
+    width: 156,
+    height: 188,
+    objectFit: "cover",
+    objectPosition: "center top",
+    borderRadius: 8,
+    boxShadow: "0 4px 16px rgba(0,0,0,0.35)",
+  },
+  portraitPlaceholder: {
+    width: 156,
+    height: 188,
+    borderRadius: 8,
+    background: "linear-gradient(150deg,#1b2431,#222b3a)",
+    display: "grid",
+    placeItems: "center",
+    boxShadow: "0 4px 16px rgba(0,0,0,0.35)",
+  },
+  portraitName: {
+    fontSize: 13,
+    color: "#cbd2db",
+    fontWeight: 600,
   },
   header: {
     padding: "12px 16px",

@@ -1,0 +1,19 @@
+{
+  "version": "1.0",
+  "license": "Project-owned (AI-generated)",
+  "humans": {
+    "npc_xiaofang": "/assets/portraits/humans/xiaofang.png",
+    "npc_xiaoming": "/assets/portraits/humans/xiaoming.png",
+    "npc_xiaowang": "/assets/portraits/humans/xiaowang.png",
+    "npc_linna":    "/assets/portraits/humans/linna.png",
+    "npc_chenbo":   "/assets/portraits/humans/chenbo.png",
+    "npc_ayan":     "/assets/portraits/humans/ayan.png",
+    "player_default": "/assets/portraits/humans/player_default.png"
+  },
+  "animals": {
+    "animal_doudou":  "/assets/portraits/animals/doudou.png",
+    "animal_heihei":  "/assets/portraits/animals/heihei.png",
+    "animal_mimi":    "/assets/portraits/animals/mimi.png",
+    "animal_xiaobai": "/assets/portraits/animals/xiaobai.png"
+  }
+}

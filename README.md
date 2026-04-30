@@ -160,6 +160,22 @@ npm run gen:types
 
 ---
 
+## E2E 验收
+
+完整 6 个演示场景的 Playwright 自动化用例位于 `e2e/`：
+
+```bash
+./scripts/dev.sh                    # 起前后端
+cd e2e
+npm install
+npx playwright install chromium
+npm test
+```
+
+详见 `e2e/README.md`。
+
+---
+
 ## 文档入口
 
 | 文档 | 作用 |
@@ -169,4 +185,6 @@ npm run gen:types
 | `docs/实施方案/实施方案目录与模块边界.md` | 模块拆分 |
 | `docs/实施方案/数据模型与接口契约V1.md` | 前后端契约 |
 | `docs/实施方案/ToolCalling工具契约V1.md` | LLM 工具集 |
+| `docs/实施方案/视觉资源与美术资产方案.md` | 美术资产决策与 fetch 流程 |
 | `docs/实施方案/MVP开发任务拆分.md` | 开发迭代计划 |
+| `CREDITS.md` | 第三方资源署名 |

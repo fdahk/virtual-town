@@ -74,3 +74,17 @@ async def search_agent_memories(
     session: AsyncSession = Depends(get_session),
 ) -> list[MemorySearchResult]:
     return await get_agent_service().search_memories(session, agent_id, request)
+
+
+@router.post("/{agent_id}/reflect", response_model=list[Memory])
+async def force_agent_reflect(
+    agent_id: str,
+    session: AsyncSession = Depends(get_session),
+) -> list[Memory]:
+    """手动触发反思。用于演示与测试。"""
+    from app.core.time import utcnow
+    from app.domain.memory.reflection import maybe_reflect
+    from app.schemas.memory import Memory as MemorySchema
+
+    memories = await maybe_reflect(session, agent_id, world_time=utcnow(), force=True)
+    return [MemorySchema.model_validate(m) for m in memories]

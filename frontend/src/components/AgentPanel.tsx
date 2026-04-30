@@ -1,6 +1,42 @@
 import { useQuery } from "@tanstack/react-query";
 import { useWorldStore } from "../stores/worldStore";
 import { api } from "../api";
+import { usePortrait } from "../game/assets/usePortrait";
+import type { AgentProfile } from "../types/domain";
+
+function AvatarBadge({ agent }: { agent: AgentProfile }) {
+  const portrait = usePortrait(agent.id);
+  if (portrait) {
+    return (
+      <div
+        style={{
+          ...avatarStyles.frame,
+          backgroundImage: `url(${portrait})`,
+          backgroundSize: "cover",
+          backgroundPosition: "center top",
+        }}
+      />
+    );
+  }
+  return (
+    <div
+      style={{
+        ...avatarStyles.frame,
+        background: agent.appearance?.color ?? "#aaa",
+      }}
+    />
+  );
+}
+
+const avatarStyles: Record<string, React.CSSProperties> = {
+  frame: {
+    width: 40,
+    height: 40,
+    borderRadius: 8,
+    boxShadow: "0 0 0 2px rgba(255,255,255,0.12)",
+    overflow: "hidden",
+  },
+};
 
 const INTERACTION_LABEL: Record<string, string> = {
   pet: "抚摸",
@@ -36,12 +72,7 @@ export function AgentPanel({ onOpenMemory }: { onOpenMemory(id: string): void })
   return (
     <div style={styles.wrap}>
       <div style={styles.header}>
-        <div
-          style={{
-            ...styles.avatar,
-            background: agent.appearance?.color ?? "#aaa",
-          }}
-        />
+        <AvatarBadge agent={agent} />
         <div style={{ display: "grid", gap: 2 }}>
           <div style={{ fontSize: 16, fontWeight: 700 }}>{agent.name}</div>
           <div style={{ fontSize: 12, opacity: 0.65 }}>
