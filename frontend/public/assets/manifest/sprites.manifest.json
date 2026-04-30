@@ -5,7 +5,9 @@
     "frame_height": 64,
     "columns": 9,
     "rows": 4,
-    "display_scale": 0.75,
+    "display_scale": 1.0,
+    "origin_y": 0.75,
+    "_label_above_px_note": "frame_height × display_scale × origin_y + gap = 64×1.0×0.75+6 = 54; TownScene computes this dynamically",
     "animations": {
       "idle_up":    { "frames": [0],                  "frameRate": 1 },
       "walk_up":    { "frames": [1, 2, 3, 4, 5, 6, 7, 8],  "frameRate": 10 },

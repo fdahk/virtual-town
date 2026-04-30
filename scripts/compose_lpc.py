@@ -2,11 +2,14 @@
 把下载好的 LPC 分层 PNG 合成为每个 NPC 最终 sprite sheet。
 
 LPC 标准 sheet 尺寸：832 × 1344 像素，64×64 每帧，21 行 × 13 列；
-本项目只使用 walk 四向（8-11 行，每行 9 帧），因此合成后只保留这 4 行，
-最终产出 576 × 256 的 sheet（9 列 × 4 行）。
+扩展 sheet：832 × 2944（46 行），walk 动画仍位于第 8-11 行。
+本项目只使用 walk 四向（8-11 行，每行 9 帧），最终产出 576 × 256（9 列 × 4 行）。
 
 层 z-order（下层先画）：
-    body → legs → shoes → torso → hair
+    body → head → legs → feet → torso → hair
+
+重要：body/bodies/*/light.png 只含躯干（无头部），
+      head/heads/human/*/light.png 才是面部皮肤层，必须单独加载。
 层不存在时跳过；失败不会阻塞主流程。
 """
 
@@ -19,9 +22,11 @@ from PIL import Image
 
 
 # NPC → 各层文件名（和 fetch_assets.sh 中一一对应）
+# head 层是面部皮肤，必须紧跟 body 层合成，否则角色只有头发没有脸。
 NPC_LAYERS: dict[str, dict[str, str]] = {
     "xiaofang": {  # 咖啡店店员，女，长黑发，围裙
         "body": "body_female_light.png",
+        "head": "head_female_light.png",
         "hair": "hair_ponytail_female_raven.png",
         "torso": "apron_female_white.png",
         "legs": "pants_female_black.png",
@@ -29,6 +34,7 @@ NPC_LAYERS: dict[str, dict[str, str]] = {
     },
     "xiaoming": {  # 高中生，男，黑短发
         "body": "body_male_light.png",
+        "head": "head_male_light.png",
         "hair": "hair_short_male_black.png",
         "torso": "shirt_longsleeve_male_blue.png",
         "legs": "pants_male_black.png",
@@ -36,6 +42,7 @@ NPC_LAYERS: dict[str, dict[str, str]] = {
     },
     "xiaowang": {  # 程序员，男，棕短发
         "body": "body_male_light.png",
+        "head": "head_male_light.png",
         "hair": "hair_short_male_brown.png",
         "torso": "shirt_longsleeve_male_charcoal.png",
         "legs": "pants_male_charcoal.png",
@@ -43,6 +50,7 @@ NPC_LAYERS: dict[str, dict[str, str]] = {
     },
     "linna": {  # 医生，女，长黑发
         "body": "body_female_light.png",
+        "head": "head_female_light.png",
         "hair": "hair_long_female_black.png",
         "torso": "shirt_longsleeve_female_bluegray.png",
         "legs": "pants_female_black.png",
@@ -50,6 +58,7 @@ NPC_LAYERS: dict[str, dict[str, str]] = {
     },
     "chenbo": {  # 老板，男，灰发
         "body": "body_male_taupe.png",
+        "head": "head_male_taupe.png",
         "hair": "hair_short_male_gray.png",
         "torso": "shirt_longsleeve_male_gray.png",
         "legs": "pants_male_brown.png",
@@ -57,6 +66,7 @@ NPC_LAYERS: dict[str, dict[str, str]] = {
     },
     "ayan": {  # 花店女主，长薰衣草发
         "body": "body_female_light.png",
+        "head": "head_female_light.png",
         "hair": "hair_long_female_lavender.png",
         "torso": "shirt_longsleeve_female_lavender.png",
         "legs": "pants_female_brown.png",
@@ -64,6 +74,7 @@ NPC_LAYERS: dict[str, dict[str, str]] = {
     },
     "player_default": {  # 玩家默认
         "body": "body_male_light.png",
+        "head": "head_male_light.png",
         "hair": "hair_short_male_brown.png",
         "torso": "shirt_longsleeve_male_blue.png",
         "legs": "pants_male_brown.png",
@@ -121,7 +132,8 @@ def _compose_one(layers: list[Path]) -> Image.Image | None:
 
 
 def compose_npc(name: str, layer_map: dict[str, str], in_dir: Path, out_dir: Path) -> Path | None:
-    order = ("body", "legs", "feet", "torso", "hair")
+    # head 必须紧跟 body 合成，使面部皮肤出现在服装和头发之下
+    order = ("body", "head", "legs", "feet", "torso", "hair")
     layer_paths = [in_dir / layer_map[k] for k in order if k in layer_map]
     sheet = _compose_one(layer_paths)
     if sheet is None:

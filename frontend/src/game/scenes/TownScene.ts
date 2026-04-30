@@ -470,20 +470,29 @@ export class TownScene extends Phaser.Scene {
       },
     );
 
-    const label = this.add.text(px, py - DISPLAY_TILE * 0.8, profile.name, {
+    // 标签底部需高于 sprite 顶部（py - spriteTopOffset），再留 6px 间隙。
+    // spriteTopOffset = frame_height × display_scale × origin_y
+    //   = 64 × 0.75 × 0.75 = 36px  →  LABEL_ABOVE = 42px ≈ DISPLAY_TILE * 1.3
+    const SPRITE_ORIGIN_Y = 0.75;
+    const spriteTopOffset = m
+      ? Math.ceil(m.sprites.humans.frame_height * m.sprites.humans.display_scale * SPRITE_ORIGIN_Y)
+      : DISPLAY_TILE;
+    const LABEL_ABOVE = spriteTopOffset + 6;
+    const label = this.add.text(px, py - LABEL_ABOVE, profile.name, {
       fontSize: "11px",
       color: "#ffffff",
       backgroundColor: "rgba(0,0,0,0.55)",
       padding: { left: 3, right: 3 },
     });
     label.setOrigin(0.5, 1);
+    // emoji 底部与标签底部同高，向右偏移，令其出现在名签右侧而非覆盖头部
     const emoji = this.add.text(
       px + DISPLAY_TILE / 2 - 3,
-      py - DISPLAY_TILE * 0.65,
+      py - LABEL_ABOVE,
       STATE_EMOJI[rt.state] ?? "",
       { fontSize: "12px" },
     );
-    emoji.setOrigin(1, 0);
+    emoji.setOrigin(0, 1);
 
     this.agentLayer.add([sprite as Phaser.GameObjects.GameObject, label, emoji]);
     const node: AgentNode = {
@@ -590,17 +599,23 @@ export class TownScene extends Phaser.Scene {
       duration: 260,
       ease: "Sine.easeInOut",
     });
+    const m2 = this.manifests;
+    const SPRITE_ORIGIN_Y2 = 0.75;
+    const spriteTopOffset2 = m2
+      ? Math.ceil(m2.sprites.humans.frame_height * m2.sprites.humans.display_scale * SPRITE_ORIGIN_Y2)
+      : DISPLAY_TILE;
+    const labelAbove2 = spriteTopOffset2 + 6;
     this.tweens.add({
       targets: node.label,
       x: targetX,
-      y: targetY - DISPLAY_TILE * 0.8,
+      y: targetY - labelAbove2,
       duration: 260,
       ease: "Sine.easeInOut",
     });
     this.tweens.add({
       targets: node.emoji,
       x: targetX + DISPLAY_TILE / 2 - 3,
-      y: targetY - DISPLAY_TILE * 0.65,
+      y: targetY - labelAbove2,
       duration: 260,
       ease: "Sine.easeInOut",
     });
