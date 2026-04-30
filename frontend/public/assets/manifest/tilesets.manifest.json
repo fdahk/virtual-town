@@ -21,14 +21,13 @@
     "road": 40,
     "bridge": 43,
     "dirt": 37,
-    "tree": 4,
-    "wall": 77,
-    "floor": 37,
+    "floor": 109,
+    "wall": 96,
     "cafe_ext": 60,
     "school_ext": 52,
     "grocery_ext": 60,
     "flower_ext": 62,
-    "cafe_door": 77,
+    "cafe_door": 74,
     "school_door": 74,
     "grocery_door": 78,
     "flower_door": 74,
@@ -39,13 +38,16 @@
     "water": 255
   },
   "overlay_tiles": {
-    "tree_top_0": 4,
-    "tree_top_1": 6,
-    "tree_top_2": 8,
+    "tree_pine": 4,
+    "tree_pine_2": 6,
+    "tree_pine_3": 8,
+    "tree_yellow": 3,
     "mushroom": 29,
-    "flowers": 93,
     "sign": 83,
-    "crate": 94,
-    "barrel": 107
+    "barrel": 107,
+    "beehive": 94,
+    "cauldron": 92,
+    "fence_h": 81,
+    "target": 95
   }
 }

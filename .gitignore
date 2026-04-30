@@ -54,3 +54,6 @@ generative_agents/
 # Cache
 .cache/
 *.tmp
+
+# Backups（scripts/backup_db.sh 输出）
+backups/

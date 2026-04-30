@@ -24,9 +24,10 @@
 |----|------|
 | 前端 | React + Vite + TypeScript + Phaser 3 + Tiled + Zustand + TanStack Query |
 | 后端 | FastAPI + SQLAlchemy + Alembic + Pydantic v2 |
-| 数据库 | PostgreSQL + pgvector |
-| 缓存/队列 | Redis |
-| 实时通信 | WebSocket（增量广播） |
+| 数据库 | PostgreSQL + pgvector（HNSW 索引） |
+| 缓存/队列 | Redis + RQ（独立 worker 容器；`tasks` 表为权威状态与审计源） |
+| 实时通信 | WebSocket（增量广播 + seq 检测 + 断线重连 + 快照恢复） |
+| 可观测性 | 独立观测平台（trace/span、LLM / Tool / Task / Error 审计、WS 推送） |
 | 大模型 | OpenAI 兼容接口（通义千问 / DeepSeek 默认走 DashScope 兼容模式） |
 | 容器化 | Docker Compose |
 
@@ -40,35 +41,39 @@
 virtual-town/
 ├── backend/                    # FastAPI 后端
 │   ├── app/
-│   │   ├── api/                # REST 路由
-│   │   ├── core/               # 配置、日志、事件总线
+│   │   ├── api/                # REST 路由（含 /api/observability & /api/health/*）
+│   │   ├── core/               # 配置 / 日志 / 错误码 / 事件总线 / TraceContext / Redis 客户端
 │   │   ├── db/                 # ORM 模型、session、种子
-│   │   ├── domain/             # 领域逻辑（world/simulation/agent/memory）
-│   │   ├── llm/                # LLM 接入、tool calling
+│   │   ├── domain/
+│   │   │   ├── world/          # 场景网格、A* 寻路、场景缓存
+│   │   │   ├── simulation/     # 仿真引擎、规则版 Agent
+│   │   │   ├── memory/         # 反思与日结
+│   │   │   └── tasks/          # TaskQueue (enqueue) / runner (RQ 消费入口) / worker (RQ Worker 进程) / handlers / TTL worker
+│   │   ├── llm/                # LLM 接入 + tool calling（全量 Observer 埋点）
 │   │   ├── schemas/            # Pydantic schema
-│   │   ├── services/           # 应用服务
-│   │   ├── websocket/          # WebSocket gateway
+│   │   ├── services/           # WorldService / AgentService / PlayerService /
+│   │   │                       # MemoryService / SimulationRuntime /
+│   │   │                       # Observer / EventRouter
+│   │   ├── websocket/          # WebSocket gateway + 观测 WS
 │   │   ├── prompts/            # 版本化 prompt 模板
-│   │   └── main.py             # FastAPI 入口
-│   ├── alembic/                # 数据库迁移
-│   ├── tests/                  # 后端测试
+│   │   └── main.py             # FastAPI 入口（lifespan 统一拉起基础设施）
+│   ├── alembic/                # 数据库迁移（含 pgvector HNSW 索引）
+│   ├── tests/                  # 后端测试（含 trace / observer / task queue）
 │   └── pyproject.toml
 ├── frontend/                   # React + Vite 前端
 │   ├── src/
-│   │   ├── app/                # 全局入口与 provider
-│   │   ├── pages/              # 页面组件
+│   │   ├── app/                # 全局入口 + 路由切换（/observability 与玩家页面隔离）
+│   │   ├── pages/              # 玩家页面（TownPage / CreatePlayerPage）
+│   │   ├── pages/observability/ # 独立研发观测平台
 │   │   ├── components/         # UI 组件
 │   │   ├── game/               # Phaser 游戏层
-│   │   │   ├── scenes/
-│   │   │   ├── systems/
-│   │   │   └── eventBus.ts
 │   │   ├── stores/             # Zustand
-│   │   ├── api/                # REST/WS 客户端
-│   │   └── types/              # 类型（含 OpenAPI 生成）
+│   │   ├── api/                # REST / WS 客户端（ReliableSocket 自动重连 + 快照恢复）
+│   │   └── types/              # 类型（含观测平台类型）
 │   ├── public/assets/          # 美术资源
 │   └── package.json
 ├── docs/                       # 产品需求与实施方案（权威）
-├── scripts/                    # 一键启动、种子、重置
+├── scripts/                    # 一键启动、种子、重置、数据库备份
 ├── docker-compose.yml
 ├── .env.example
 └── README.md
@@ -101,10 +106,11 @@ docker compose up --build
 
 | 脚本 | 作用 |
 |------|------|
-| `./scripts/dev.sh` | 一键启动完整开发环境 |
+| `./scripts/dev.sh` | 一键启动完整开发环境（含任务 worker / 观测 flush） |
 | `./scripts/seed.sh` | 初始化演示世界 |
 | `./scripts/seed.sh --if-empty` | 数据库为空时才初始化 |
 | `./scripts/reset_db.sh` | 销毁并重建数据库 |
+| `./scripts/backup_db.sh` | `pg_dump` + asset manifest 快照到 `./backups/` |
 
 ---
 
@@ -160,6 +166,63 @@ npm run gen:types
 
 ---
 
+## 研发观测平台
+
+独立于玩家页面，用于**还原系统每一步运行过程**（一次决策、一次玩家对话、一次工具调用、一次记忆写入）。
+
+访问地址：
+
+- 前端：<http://localhost:5173/observability>
+- REST：`GET /api/observability/*`
+- WS：`ws://localhost:8000/ws/observability/{simulation_id}`
+
+可观察的维度：
+
+- **Dashboard**：仿真 / WS 在线数 / LLM 平均耗时 / 错误率 / 任务分布。
+- **World Events**：世界事件流，按事件类型、实体、场景筛选。
+- **Obs Events**：跨模块观测事件流（trace_id / category / level）。
+- **Agent Runtime**：输入 `agent_id` 查看档案 + 状态 + Redis 热数据 + 最近事件 + 最近记忆。
+- **Traces**：按 `trace_id` 查一次决策 / 玩家 query 的完整 span 树 + LLM/Tool/Task 详情。
+- **LLM Calls / Tool Calls / Tasks / Errors**：全量审计表 + 聚合。
+- **Health**：`/api/health/db`、`/api/health/redis`、`/api/health/llm` 实时探测。
+
+所有观测数据**默认脱敏**：API Key、Authorization、password、`raw_prompt` 自动打码，
+超长字符串截断到 512 字符。
+
+---
+
+## 异步任务与数据层
+
+- 所有 LLM / embedding / 反思 / 日结通过 `TaskQueue` 异步执行：
+  - **消息层**：Redis + RQ（`rq>=1.16`），按优先级切 `vt:high / vt:default / vt:low` 三条队列。
+  - **状态 / 审计**：`tasks` + `task_status_log` 表是权威源；Redis 只负责消息分发，
+    RQ 结果 TTL 60s 即丢弃。
+  - **部署**：`worker` 独立容器（`python -m app.domain.tasks.worker`），扩容用
+    `docker compose up --scale worker=N`；`scripts/dev.sh` 本地开发自动并起。
+- 幂等 key `{task_type}:{entity_id}:{simulation_step}`，重复 enqueue 不会重复入库；
+  失败 + retryable + retry_count < max_retries 自动回推 RQ 并指数退避；终态
+  `succeeded / failed / timeout` 落表供观测平台回放。
+- 记忆检索：pgvector HNSW 索引（`vector_cosine_ops`，`m=16, ef_construction=64`）。
+- Redis 短期记忆：`agent:{id}:short_memory`（TTL 24h）、`dialogue:{id}:recent_messages`、
+  `world:{scene}:active_entities` 等；Redis 不可用时自动降级到 Postgres。
+- TTL 清理 worker：过期短期记忆按重要度升级长期或归档；与 RQ 共享 worker 进程里的
+  asyncio 持久 loop。
+
+相关环境变量：
+
+```
+TASK_QUEUE_MODE=async         # async（默认，走 RQ）/ sync（inline LLM，用于回归）
+TASK_QUEUE_BACKEND=rq         # 预留切 celery 的扩展点
+TASK_QUEUE_HIGH=vt:high
+TASK_QUEUE_DEFAULT=vt:default
+TASK_QUEUE_LOW=vt:low
+TASK_QUEUE_WORKER_COUNT=1
+OBSERVABILITY_FLUSH_INTERVAL=1.5
+OBSERVABILITY_BATCH_SIZE=200
+```
+
+---
+
 ## E2E 验收
 
 完整 6 个演示场景的 Playwright 自动化用例位于 `e2e/`：
@@ -186,5 +249,7 @@ npm test
 | `docs/实施方案/数据模型与接口契约V1.md` | 前后端契约 |
 | `docs/实施方案/ToolCalling工具契约V1.md` | LLM 工具集 |
 | `docs/实施方案/视觉资源与美术资产方案.md` | 美术资产决策与 fetch 流程 |
-| `docs/实施方案/MVP开发任务拆分.md` | 开发迭代计划 |
+| `docs/实施方案/事件系统与任务调度模块实施方案.md` | 异步任务 / 事件 / 重试契约 |
+| `docs/实施方案/可观测性与错误处理方案.md` | 观测平台与错误码规范 |
+| `docs/实施方案/MVP开发任务拆分.md` | 开发迭代计划（§12 / §13 / §14 为基础设施层） |
 | `CREDITS.md` | 第三方资源署名 |

@@ -165,6 +165,8 @@ export interface SimulationState {
 export interface SimulationDeltaPayload {
   step: number;
   world_time: string;
+  /** 单调递增的序号（§14.5）：前端据此检测丢失与乱序。 */
+  seq?: number | null;
   entity_updates: AgentRuntimeState[];
   events: WorldEvent[];
 }

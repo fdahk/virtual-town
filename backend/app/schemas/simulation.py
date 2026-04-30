@@ -65,6 +65,8 @@ class AgentActionRead(BaseModel):
 class SimulationDeltaPayload(BaseModel):
     step: int
     world_time: datetime
+    # seq 单调递增；前端可据此检测丢失与乱序（§14.5 WebSocket 健壮性）
+    seq: int | None = None
     entity_updates: list[AgentRuntimeState] = Field(default_factory=list)
     events: list[WorldEvent] = Field(default_factory=list)
 

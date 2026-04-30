@@ -2,7 +2,7 @@
 种子数据脚本。
 
 生成：
-- 室外大地图 + 3 个室内地图（咖啡店、学校、杂货店）
+- 室外大地图 + 4 个室内地图（咖啡店、学校、杂货店、阿言花店）
 - 6 个人类 NPC（小明、小芳、小王、林娜、陈伯、阿言）
 - 2 只狗（豆豆、黑黑）+ 2 只猫（咪咪、小白）
 - 初始关系网络
@@ -47,6 +47,7 @@ OUTDOOR_ID = "scene_town_outdoor"
 CAFE_ID = "scene_cafe_inside"
 SCHOOL_ID = "scene_school_inside"
 GROCERY_ID = "scene_grocery_inside"
+FLOWER_ID = "scene_flower_inside"
 
 OUTDOOR_W, OUTDOOR_H = 40, 30
 INDOOR_W, INDOOR_H = 16, 12
@@ -194,7 +195,7 @@ def build_indoor_tiles(
     - 家具由 world_objects 添加，不改动 tile
     - 入口 tile 在 (entry_x, 11)
     """
-    entry_x = {"cafe": 7, "school": 7, "grocery": 7, "home": 7}[kind]
+    entry_x = {"cafe": 7, "school": 7, "grocery": 7, "home": 7, "flower": 7}[kind]
     tiles: list[dict[str, Any]] = []
     for y in range(INDOOR_H):
         for x in range(INDOOR_W):
@@ -301,6 +302,15 @@ def seed(session: Session, *, force: bool = True) -> None:
         tile_size=32,
         description="货架琳琅满目的小杂货铺，陈伯在这里守了很多年。",
     )
+    flower_inside = MapScene(
+        id=FLOWER_ID,
+        name="阿言花店·花房",
+        scene_type="indoor",
+        width=INDOOR_W,
+        height=INDOOR_H,
+        tile_size=32,
+        description="散发着花香的小花房，到处是花架和盆栽，阿言在这里精心照料每一株花。",
+    )
     # 6 处 NPC 住宅室内场景
     home_scene_meta: dict[str, tuple[str, str]] = {
         "xiaofang": ("小芳家·卧室",   "小芳的温馨小屋，窗台上摆着盆栽，桌上有诗集。"),
@@ -323,7 +333,7 @@ def seed(session: Session, *, force: bool = True) -> None:
         )
         home_scenes[key] = hs
 
-    session.add_all([outdoor, cafe, school, grocery, *home_scenes.values()])
+    session.add_all([outdoor, cafe, school, grocery, flower_inside, *home_scenes.values()])
     session.flush()
 
     for t in build_outdoor_tiles():
@@ -334,6 +344,8 @@ def seed(session: Session, *, force: bool = True) -> None:
         session.add(MapTile(scene_id=school.id, **t))
     for t in build_indoor_tiles("grocery"):
         session.add(MapTile(scene_id=grocery.id, **t))
+    for t in build_indoor_tiles("flower"):
+        session.add(MapTile(scene_id=flower_inside.id, **t))
     for key, hs in home_scenes.items():
         for t in build_indoor_tiles("home"):
             session.add(MapTile(scene_id=hs.id, **t))
@@ -407,6 +419,16 @@ def seed(session: Session, *, force: bool = True) -> None:
         open_hours={"start": "09:00", "end": "19:00"},
         tags=["flower_shop", "nature"],
     )
+    flower_interior = Location(
+        id="loc_flower_interior",
+        scene_id=FLOWER_ID,
+        name="阿言花店·花房（室内）",
+        location_type="room",
+        bounds={"x": 1, "y": 1, "width": 14, "height": 10},
+        entry_tiles=[{"x": 7, "y": 10}],
+        open_hours={"start": "09:00", "end": "19:00"},
+        tags=["flower_interior", "workplace", "nature"],
+    )
     river_bench = Location(
         id="loc_river_bench",
         scene_id=outdoor.id,
@@ -437,7 +459,8 @@ def seed(session: Session, *, force: bool = True) -> None:
         cafe_loc, cafe_interior,
         school_loc, school_interior,
         grocery_loc, grocery_interior,
-        flower_loc, river_bench, park,
+        flower_loc, flower_interior,
+        river_bench, park,
     ]
     for key, (loc_id, bounds, name) in homes.items():
         door_y = bounds["y"] + bounds["height"] - 1   # 建筑底行（walkable door tile）
@@ -532,6 +555,27 @@ def seed(session: Session, *, force: bool = True) -> None:
             requires_permission=False,
             name="杂货店门（出）",
         ),
+        # 花店入口 / 出口
+        Portal(
+            id="portal_flower_in",
+            from_scene_id=outdoor.id,
+            from_tile={"x": 6, "y": 11},
+            to_scene_id=FLOWER_ID,
+            to_tile={"x": 7, "y": 9},
+            interaction_type="auto_enter",
+            requires_permission=False,
+            name="花店门（入）",
+        ),
+        Portal(
+            id="portal_flower_out",
+            from_scene_id=FLOWER_ID,
+            from_tile={"x": 7, "y": 11},
+            to_scene_id=outdoor.id,
+            to_tile={"x": 6, "y": 12},
+            interaction_type="auto_enter",
+            requires_permission=False,
+            name="花店门（出）",
+        ),
     ]
     # 6 处 NPC 住宅传送门（进 + 出各 1，共 12 个）
     for key, (loc_id, bounds, name) in homes.items():
@@ -563,7 +607,7 @@ def seed(session: Session, *, force: bool = True) -> None:
 
     # ------------------ World objects ------------------
     objects: list[WorldObject] = []
-    # 护栏（无桥处的河岸）
+    # 护栏（无桥处的河岸）— tile_frame=81 横向木栅栏
     for x in list(range(0, 12)) + list(range(17, OUTDOOR_W)):
         objects.append(
             WorldObject(
@@ -575,20 +619,96 @@ def seed(session: Session, *, force: bool = True) -> None:
                 size={"width": 1, "height": 1},
                 blocks_movement=True,
                 available_interactions=[],
-                state={},
+                state={"tile_frame": 81},
                 tags=["fence", "safety"],
             )
         )
 
+    # 河边长椅（loc_river_bench 区域：x=22~24, y=7）
+    for bx in (22, 24):
+        objects.append(
+            WorldObject(
+                id=_uid("obj_bench"),
+                scene_id=outdoor.id,
+                name="河边长椅",
+                object_type="furniture",
+                position={"x": bx, "y": 7},
+                size={"width": 1, "height": 1},
+                blocks_movement=False,
+                available_interactions=["sit", "inspect"],
+                state={"color": 0xB87333},          # 铜棕色模拟木椅
+                tags=["bench", "rest", "river"],
+            )
+        )
+
+    # 中心广场装饰——指示牌 + 花草
+    objects.append(WorldObject(
+        id=_uid("obj_sign"),
+        scene_id=outdoor.id,
+        name="广场告示牌",
+        object_type="decoration",
+        position={"x": 18, "y": 11},
+        size={"width": 1, "height": 1},
+        blocks_movement=False,
+        available_interactions=["read"],
+        state={"tile_frame": 83},               # 木牌瓦片
+        tags=["sign", "plaza"],
+    ))
+    objects.append(WorldObject(
+        id=_uid("obj_flower_deco"),
+        scene_id=outdoor.id,
+        name="广场花坛",
+        object_type="plant",
+        position={"x": 21, "y": 12},
+        size={"width": 1, "height": 1},
+        blocks_movement=False,
+        available_interactions=["inspect"],
+        state={"tile_frame": 94},               # 蜂巢/花饰瓦片
+        tags=["plant", "plaza"],
+    ))
+
+    # 杂货店旁——木桶
+    objects.append(WorldObject(
+        id=_uid("obj_barrel"),
+        scene_id=outdoor.id,
+        name="杂货桶",
+        object_type="decoration",
+        position={"x": 36, "y": 10},
+        size={"width": 1, "height": 1},
+        blocks_movement=False,
+        available_interactions=["inspect"],
+        state={"tile_frame": 107},              # 深色木桶瓦片
+        tags=["barrel", "grocery"],
+    ))
+
+    # 花店门外——盆栽展示
+    for fx, fy in ((4, 12), (8, 12)):
+        objects.append(WorldObject(
+            id=_uid("obj_pot"),
+            scene_id=outdoor.id,
+            name="盆栽展示",
+            object_type="plant",
+            position={"x": fx, "y": fy},
+            size={"width": 1, "height": 1},
+            blocks_movement=False,
+            available_interactions=["inspect"],
+            state={"tile_frame": 94},           # 蜂巢/花饰
+            tags=["plant", "flower_shop"],
+        ))
+
     # 咖啡店室内家具
+    # state 中 color 供 TownScene 富化渲染；tile_frame 仅限 1×1 对象
     cafe_furniture = [
-        ("吧台", 3, 2, 6, 1, True, ["inspect"], "furniture"),
-        ("咖啡机", 4, 2, 1, 1, True, ["make_coffee", "inspect", "clean"], "facility"),
-        ("小桌", 10, 4, 1, 1, True, ["sit", "inspect"], "furniture"),
-        ("小桌", 10, 7, 1, 1, True, ["sit", "inspect"], "furniture"),
-        ("书架", 2, 8, 1, 2, True, ["inspect"], "furniture"),
+        # name, x, y, w, h, blk, ints, otype, color
+        ("吧台",   3,  2, 6, 1, True,  ["inspect"],                    "furniture", 0xBB8855),
+        ("咖啡机", 4,  2, 1, 1, True,  ["make_coffee", "inspect"],    "facility",  0x333333),
+        ("小桌",   10, 4, 1, 1, True,  ["sit", "inspect"],            "furniture", 0xBB8855),
+        ("小桌",   10, 7, 1, 1, True,  ["sit", "inspect"],            "furniture", 0xBB8855),
+        ("书架",   2,  8, 1, 2, True,  ["inspect"],                    "furniture", 0x663311),
+        ("椅子",   9,  4, 1, 1, False, ["sit", "inspect"],            "furniture", 0x9B6B3A),
+        ("椅子",   9,  7, 1, 1, False, ["sit", "inspect"],            "furniture", 0x9B6B3A),
     ]
-    for name, x, y, w, h, blk, ints, otype in cafe_furniture:
+    for name, x, y, w, h, blk, ints, otype, col in cafe_furniture:
         objects.append(
             WorldObject(
                 id=_uid("obj_cafe"),
@@ -599,20 +719,23 @@ def seed(session: Session, *, force: bool = True) -> None:
                 size={"width": w, "height": h},
                 blocks_movement=blk,
                 available_interactions=ints,
-                state={},
+                state={"color": col},
                 tags=["cafe"],
             )
         )
 
     # 学校室内
     school_furniture = [
-        ("黑板", 4, 2, 6, 1, True, ["inspect"], "furniture"),
-        ("讲台", 7, 3, 2, 1, True, ["inspect"], "furniture"),
-        ("课桌", 3, 6, 1, 1, True, ["sit", "inspect"], "furniture"),
-        ("课桌", 6, 6, 1, 1, True, ["sit", "inspect"], "furniture"),
-        ("课桌", 9, 6, 1, 1, True, ["sit", "inspect"], "furniture"),
+        # name, x, y, w, h, blk, ints, otype, color
+        ("黑板", 4,  2, 6, 1, True,  ["inspect", "write"],  "furniture", 0x2D5A27),
+        ("讲台", 7,  3, 2, 1, True,  ["inspect"],           "furniture", 0xBB8855),
+        ("课桌", 3,  6, 1, 1, True,  ["sit", "inspect"],   "furniture", 0xC49A6C),
+        ("课桌", 6,  6, 1, 1, True,  ["sit", "inspect"],   "furniture", 0xC49A6C),
+        ("课桌", 9,  6, 1, 1, True,  ["sit", "inspect"],   "furniture", 0xC49A6C),
+        ("课桌", 12, 6, 1, 1, True,  ["sit", "inspect"],   "furniture", 0xC49A6C),
+        ("书架", 2,  4, 1, 4, True,  ["inspect", "browse"], "furniture", 0x663311),
     ]
-    for name, x, y, w, h, blk, ints, otype in school_furniture:
+    for name, x, y, w, h, blk, ints, otype, col in school_furniture:
         objects.append(
             WorldObject(
                 id=_uid("obj_school"),
@@ -623,18 +746,20 @@ def seed(session: Session, *, force: bool = True) -> None:
                 size={"width": w, "height": h},
                 blocks_movement=blk,
                 available_interactions=ints,
-                state={},
+                state={"color": col},
                 tags=["school"],
             )
         )
 
     # 杂货店室内
     grocery_furniture = [
-        ("柜台", 3, 2, 6, 1, True, ["inspect"], "furniture"),
-        ("货架", 2, 4, 1, 5, True, ["inspect", "browse"], "furniture"),
-        ("货架", 13, 4, 1, 5, True, ["inspect", "browse"], "furniture"),
+        # name, x, y, w, h, blk, ints, otype, color
+        ("柜台", 3,  2, 6, 1, True,  ["inspect"],           "furniture", 0xBB8855),
+        ("货架", 2,  4, 1, 5, True,  ["inspect", "browse"], "furniture", 0x8B4513),
+        ("货架", 13, 4, 1, 5, True,  ["inspect", "browse"], "furniture", 0x8B4513),
+        ("展台", 7,  5, 2, 3, False, ["inspect", "browse"], "furniture", 0xC49A6C),
     ]
-    for name, x, y, w, h, blk, ints, otype in grocery_furniture:
+    for name, x, y, w, h, blk, ints, otype, col in grocery_furniture:
         objects.append(
             WorldObject(
                 id=_uid("obj_grocery"),
@@ -645,48 +770,77 @@ def seed(session: Session, *, force: bool = True) -> None:
                 size={"width": w, "height": h},
                 blocks_movement=blk,
                 available_interactions=ints,
-                state={},
+                state={"color": col},
                 tags=["grocery"],
             )
         )
 
+    # 花店室内家具（新建）
+    flower_furniture = [
+        # name, x, y, w, h, blk, ints, otype, color
+        ("工作台",   3,  2, 6, 1, True,  ["inspect", "tend"],        "furniture", 0xBB8855),
+        ("花架·左",  2,  4, 1, 4, True,  ["inspect", "tend", "water"],"facility",  0x4A7C59),
+        ("花架·右",  13, 2, 1, 6, True,  ["inspect", "tend", "water"],"facility",  0x4A7C59),
+        ("花架·后",  4,  2, 8, 1, True,  ["inspect", "tend"],        "facility",  0x4A7C59),
+        ("收银台",   11, 2, 3, 1, True,  ["inspect"],                "furniture", 0xBB8855),
+        ("长椅",     5,  8, 4, 1, False, ["sit", "inspect"],         "furniture", 0x9B6B3A),
+        ("花盆展示", 7,  5, 2, 2, False, ["inspect"],                "plant",     0x4A7C59),
+    ]
+    for name, x, y, w, h, blk, ints, otype, col in flower_furniture:
+        objects.append(
+            WorldObject(
+                id=_uid("obj_flower"),
+                scene_id=flower_inside.id,
+                name=name,
+                object_type=otype,
+                position={"x": x, "y": y},
+                size={"width": w, "height": h},
+                blocks_movement=blk,
+                available_interactions=ints,
+                state={"color": col},
+                tags=["flower_shop"],
+            )
+        )
+
     # 6 处 NPC 住宅室内家具
-    # (name, x, y, w, h, blocks, interactions, object_type, tags)
+    # (name, x, y, w, h, blocks, interactions, object_type, tags, color)
     home_furniture_templates: dict[str, list[tuple]] = {
         "xiaofang": [
-            ("床",   5, 2, 3, 2, True,  ["sleep", "inspect"], "furniture", ["bed"]),
-            ("书桌", 10, 2, 2, 1, True,  ["inspect"],          "furniture", ["desk"]),
-            ("书架", 2,  4, 1, 3, True,  ["inspect"],          "furniture", ["bookshelf"]),
+            ("床",   5, 2, 3, 2, True,  ["sleep", "inspect"], "furniture", ["bed"],       0x8899BB),
+            ("书桌", 10, 2, 2, 1, True,  ["inspect"],          "furniture", ["desk"],      0xBB8855),
+            ("书架", 2,  4, 1, 3, True,  ["inspect"],          "furniture", ["bookshelf"], 0x663311),
+            ("椅子", 10, 3, 1, 1, False, ["sit", "inspect"],   "furniture", ["chair"],     0x9B6B3A),
         ],
         "xiaoming": [
-            ("床",   3, 2, 3, 2, True,  ["sleep", "inspect"], "furniture", ["bed"]),
-            ("书桌", 8,  2, 3, 1, True,  ["study", "inspect"], "furniture", ["desk"]),
-            ("书架", 12, 3, 1, 4, True,  ["inspect"],          "furniture", ["bookshelf"]),
+            ("床",   3, 2, 3, 2, True,  ["sleep", "inspect"], "furniture", ["bed"],       0x8899BB),
+            ("书桌", 8,  2, 3, 1, True,  ["study", "inspect"], "furniture", ["desk"],      0xBB8855),
+            ("书架", 12, 3, 1, 4, True,  ["inspect"],          "furniture", ["bookshelf"], 0x663311),
         ],
         "xiaowang": [
-            ("床",     3, 2, 3, 2, True,  ["sleep", "inspect"],          "furniture", ["bed"]),
-            ("工作台", 8, 2, 4, 1, True,  ["work", "use_computer", "inspect"], "facility", ["desk"]),
-            ("椅子",   9, 3, 1, 1, False, ["sit", "inspect"],             "furniture", ["chair"]),
+            ("床",     3, 2, 3, 2, True,  ["sleep", "inspect"],            "furniture", ["bed"],   0x8899BB),
+            ("工作台", 8, 2, 4, 1, True,  ["work", "use_computer", "inspect"], "facility", ["desk"], 0x333355),
+            ("椅子",   9, 3, 1, 1, False, ["sit", "inspect"],               "furniture", ["chair"], 0x9B6B3A),
         ],
         "linna": [
-            ("床",   5, 2, 3, 2, True,  ["sleep", "inspect"], "furniture", ["bed"]),
-            ("书架", 2, 2, 1, 5, True,  ["inspect"],          "furniture", ["bookshelf"]),
-            ("桌子", 10, 5, 2, 1, True,  ["inspect"],          "furniture", ["table"]),
+            ("床",   5, 2, 3, 2, True,  ["sleep", "inspect"], "furniture", ["bed"],       0x8899BB),
+            ("书架", 2, 2, 1, 5, True,  ["inspect"],          "furniture", ["bookshelf"], 0x663311),
+            ("桌子", 10, 5, 2, 1, True,  ["inspect"],          "furniture", ["table"],     0xBB8855),
+            ("椅子", 10, 6, 1, 1, False, ["sit", "inspect"],   "furniture", ["chair"],     0x9B6B3A),
         ],
         "chenbo": [
-            ("床",     3, 2, 3, 2, True,  ["sleep", "inspect"], "furniture", ["bed"]),
-            ("老椅子", 9, 4, 1, 1, False, ["sit", "inspect"],   "furniture", ["chair"]),
-            ("茶桌",   8, 3, 2, 1, True,  ["inspect"],          "furniture", ["table"]),
+            ("床",     3, 2, 3, 2, True,  ["sleep", "inspect"], "furniture", ["bed"],   0x8899BB),
+            ("老椅子", 9, 4, 1, 1, False, ["sit", "inspect"],   "furniture", ["chair"], 0x9B6B3A),
+            ("茶桌",   8, 3, 2, 1, True,  ["inspect"],          "furniture", ["table"], 0xBB8855),
         ],
         "ayan": [
-            ("床",   3, 2, 3, 2, True,  ["sleep", "inspect"], "furniture", ["bed"]),
-            ("花架", 9, 2, 2, 3, True,  ["inspect", "tend"],  "furniture", ["plant"]),
-            ("猫窝", 12, 6, 2, 1, False, ["inspect"],          "furniture", ["pet"]),
+            ("床",   3, 2, 3, 2, True,  ["sleep", "inspect"], "furniture", ["bed"],   0x8899BB),
+            ("花架", 9, 2, 2, 3, True,  ["inspect", "tend"],  "facility",  ["plant"], 0x4A7C59),
+            ("猫窝", 12, 6, 2, 1, False, ["inspect"],          "furniture", ["pet"],   0xE8C4A0),
         ],
     }
     for key, furniture_list in home_furniture_templates.items():
         hs = home_scenes[key]
-        for fname, fx, fy, fw, fh, fblk, fints, fotype, ftags in furniture_list:
+        for fname, fx, fy, fw, fh, fblk, fints, fotype, ftags, fcol in furniture_list:
             objects.append(
                 WorldObject(
                     id=_uid(f"obj_home_{key}"),
@@ -697,7 +851,7 @@ def seed(session: Session, *, force: bool = True) -> None:
                     size={"width": fw, "height": fh},
                     blocks_movement=fblk,
                     available_interactions=fints,
-                    state={},
+                    state={"color": fcol},
                     tags=["home"] + ftags,
                 )
             )
@@ -840,7 +994,7 @@ def seed(session: Session, *, force: bool = True) -> None:
                 "schedule_template": [
                     {"start": "00:00", "end": "07:00", "activity": "sleep",   "location_id": "loc_home_ayan_interior"},
                     {"start": "07:00", "end": "09:00", "activity": "morning", "location_id": "loc_river_bench"},
-                    {"start": "09:00", "end": "19:00", "activity": "flower",  "location_id": "loc_flower", "description": "在花店照料植物"},
+                    {"start": "09:00", "end": "19:00", "activity": "flower",  "location_id": "loc_flower_interior", "description": "在花店照料植物"},
                     {"start": "19:00", "end": "21:00", "activity": "cafe",    "location_id": "loc_hobbs_cafe_interior"},
                     {"start": "21:00", "end": "24:00", "activity": "home",    "location_id": "loc_home_ayan_interior"},
                 ],

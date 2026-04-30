@@ -65,6 +65,26 @@ class Settings(BaseSettings):
     simulation_ai_tick_minutes: int = Field(default=5)
     simulation_speed_default: float = Field(default=1.0)
     simulation_autostart: bool = Field(default=True)
+    # 异步任务队列（阶段 12 — Redis + RQ）
+    # - async: 投递到 RQ 队列，由独立 worker 进程消费（默认；见 docker-compose `worker` service）
+    # - sync:  保留原先 inline 的 LLM 决策路径，便于 e2e 与回归
+    task_queue_mode: Literal["async", "sync"] = Field(default="async")
+    # 后端实现：MVP 选型为 rq（规划文档 §12、事件系统与任务调度方案 §2）。
+    # 后续如需切 Celery，只需实现 ``app.domain.tasks.queue`` 的 enqueue/runner 对接，
+    # 保持 TaskRegistry/TaskHandler 不动。
+    task_queue_backend: Literal["rq"] = Field(default="rq")
+    # RQ 队列名（按优先级切成多个队列，worker 可同时监听）
+    task_queue_default: str = Field(default="vt:default")
+    task_queue_high: str = Field(default="vt:high")
+    task_queue_low: str = Field(default="vt:low")
+    # worker 进程并发（同一 worker 容器内起的 RQ worker 数量；
+    # 单 worker 已足够 MVP，扩展时直接加 ``worker`` 容器副本数即可）
+    task_queue_worker_count: int = Field(default=1)
+    # 兼容旧字段名（.env 中可能还写着 TASK_QUEUE_CONCURRENCY）
+    task_queue_concurrency: int = Field(default=2)
+    # 观测
+    observability_flush_interval: float = Field(default=1.5)
+    observability_batch_size: int = Field(default=200)
 
     @field_validator("backend_cors_origins")
     @classmethod

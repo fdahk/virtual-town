@@ -24,8 +24,9 @@ dependencies = [
   "psycopg[binary]>=3.1,<3.3",
   "alembic>=1.13,<1.17",
   "pgvector>=0.3,<0.5",
-  # Redis / 队列
+  # Redis / 队列（MVP：RQ；预留切换到 Celery）
   "redis>=5.0,<6",
+  "rq>=1.16,<2",
   # HTTP / LLM
   "httpx>=0.27,<0.29",
   "tenacity>=8,<9",

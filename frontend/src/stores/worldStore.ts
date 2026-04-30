@@ -43,6 +43,7 @@ interface WorldStore {
   setScenePortals(sceneId: string, portals: Portal[]): void;
   setSceneObjects(sceneId: string, objects: WorldObject[]): void;
   setSimulation(sim: Simulation | null): void;
+  patchSimulationClock(worldTime: string, step: number): void;
   setRuntimeStates(states: AgentRuntimeState[]): void;
   upsertRuntime(state: AgentRuntimeState): void;
   setEvents(events: WorldEvent[]): void;
@@ -88,6 +89,12 @@ export const useWorldStore = create<WorldStore>((set) => ({
     set((s) => ({ objectsByScene: { ...s.objectsByScene, [sceneId]: objects } })),
 
   setSimulation: (sim) => set(() => ({ simulation: sim })),
+  patchSimulationClock: (worldTime, step) =>
+    set((s) =>
+      s.simulation
+        ? { simulation: { ...s.simulation, world_time: worldTime, current_step: step } }
+        : {}
+    ),
   setRuntimeStates: (states) =>
     set((s) => {
       const map = { ...s.runtimeByAgent };

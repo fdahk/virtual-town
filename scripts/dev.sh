@@ -53,7 +53,7 @@ fi
 echo "[dev] 如无数据则执行种子数据..."
 "$ROOT_DIR/scripts/seed.sh" --if-empty || true
 
-echo "[dev] 启动后端开发服务器 -> http://localhost:8000"
+echo "[dev] 启动后端 API 服务器 -> http://localhost:8000"
 (
   cd backend
   if [ -f .venv/bin/activate ]; then
@@ -67,6 +67,20 @@ echo "[dev] 启动后端开发服务器 -> http://localhost:8000"
 ) &
 BACKEND_PID=$!
 
+echo "[dev] 启动 RQ worker（消费 agent_decision / embedding / reflection 等异步任务）"
+(
+  cd backend
+  if [ -f .venv/bin/activate ]; then
+    # shellcheck disable=SC1091
+    source .venv/bin/activate
+  fi
+  DATABASE_URL="${DATABASE_URL_LOCAL:-${DATABASE_URL}}" \
+  DATABASE_URL_SYNC="${DATABASE_URL_LOCAL_SYNC:-${DATABASE_URL_SYNC}}" \
+  REDIS_URL="${REDIS_URL_LOCAL:-${REDIS_URL}}" \
+    python -m app.domain.tasks.worker
+) &
+WORKER_PID=$!
+
 echo "[dev] 启动前端开发服务器 -> http://localhost:5173"
 (
   cd frontend
@@ -74,7 +88,7 @@ echo "[dev] 启动前端开发服务器 -> http://localhost:5173"
 ) &
 FRONTEND_PID=$!
 
-trap "kill $BACKEND_PID $FRONTEND_PID 2>/dev/null || true" EXIT
+trap "kill $BACKEND_PID $WORKER_PID $FRONTEND_PID 2>/dev/null || true" EXIT
 
 cat <<EOF
 
@@ -84,6 +98,9 @@ AI 小镇本地开发环境启动完成
   前端:    http://localhost:5173
   后端:    http://localhost:8000
   OpenAPI: http://localhost:8000/docs
+  研发观测: http://localhost:5173/observability
+
+  RQ worker PID: $WORKER_PID（消费 Redis 队列 vt:high / vt:default / vt:low）
 
 按 Ctrl+C 停止。
 ============================================================

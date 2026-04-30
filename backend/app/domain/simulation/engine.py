@@ -26,7 +26,13 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from app.core.config import get_settings
 from app.core.event_bus import get_event_bus
 from app.core.logging import get_logger
+from app.core.redis_client import (
+    get_redis,
+    key_agent_runtime,
+    key_scene_active_entities,
+)
 from app.core.time import iso, utcnow
+from app.core.trace_context import TraceContext
 from app.db.models import (
     Agent,
     AgentAction,
@@ -36,8 +42,10 @@ from app.db.models import (
     MapScene,
     Portal,
     Simulation,
+    Task,
     WorldEvent,
 )
+from app.services.event_router import WORLD_EVENT_TOPIC
 from app.domain.simulation.rule_agent import (
     AgentDecision,
     decide_animal_action,
@@ -258,6 +266,17 @@ class SimulationEngine:
         minutes_per_tick = 1
         self._world_time = self._world_time + timedelta(minutes=minutes_per_tick)
         self._step += 1
+        # 每个 world tick 作为一条 trace 的顶层 span。
+        # 子模块（决策、工具、LLM）在同一 trace 下嵌套 span。
+        with TraceContext.start_trace(
+            "world_tick",
+            simulation_id=self._sim_id(),
+        ):
+            await self._tick_inner()
+
+    async def _tick_inner(self) -> None:
+        sim = self._simulation
+        assert sim is not None
 
         entity_updates: list[AgentRuntimeState] = []
         now_dt = self._world_time
@@ -340,16 +359,21 @@ class SimulationEngine:
         决策策略：LLM 为主，规则为兜底。
 
         - 未配置 LLM（LLM_ENABLED=false 或无 key）：全部走规则版。
-        - 配置 LLM：每个需要决策的 Agent 先尝试 LLM，失败或返回空路径时回退规则版。
+        - 配置 LLM + ``task_queue_mode=async``（默认）：主循环**不阻塞等待 LLM**，
+          而是投递 ``agent_decision`` 任务到 TaskQueue。Worker 异步调 LLM，
+          决策结果通过工具副作用回写世界状态，主循环在下一次 tick 时才看到。
+          本轮仍然先走规则兜底，确保 NPC 永远有即时行为。
+        - ``task_queue_mode=sync``：沿用旧路径——主循环内直接 await LLM 决策，
+          成功则应用；全失败回退规则（保留用于回归/调试）。
         - 每个 Agent 独立按 ai_tick_minutes 游戏分钟间隔决策，避免全局时钟相互阻塞。
-        - Engine 主循环必须永不因 LLM 而卡住；单个 Agent 决策用独立 session 完成，
-          异常被吞掉并改用规则决策，保证小镇持续运行。
-        - LLM 工具全部失败时（无 success=True 结果），视为 LLM 失败，回退规则版。
+        - Engine 主循环必须永不因 LLM 而卡住；任何异常被吞掉改用规则决策。
         """
         from app.core.config import get_settings
         from app.llm.agent_decision import decide_with_llm
 
-        llm_enabled = get_settings().llm_is_configured
+        settings = get_settings()
+        llm_enabled = settings.llm_is_configured
+        async_mode = settings.task_queue_mode == "async"
         ai_interval = self._simulation.ai_tick_minutes if self._simulation else 5
         grids = {
             sid: g
@@ -375,7 +399,14 @@ class SimulationEngine:
                 continue
 
             applied = False
-            if llm_enabled:
+            if llm_enabled and async_mode:
+                # 异步路径：投递任务，主循环立即返回；worker 完成后下一轮 tick
+                # 通过数据库状态感知变化。本轮先让规则兜底生成即时行为，避免静止。
+                try:
+                    await self._enqueue_decision_task(agent.id, now_dt)
+                except Exception:
+                    logger.debug("enqueue agent_decision failed", exc_info=True)
+            elif llm_enabled:
                 try:
                     async with self._session_factory() as llm_session:
                         results = await decide_with_llm(
@@ -386,8 +417,6 @@ class SimulationEngine:
                         )
                         await llm_session.commit()
                         if results is not None:
-                            # 只有至少一个工具成功，才视为 LLM 决策生效；
-                            # 全部失败（如 TARGET_NOT_REACHABLE）则回退规则版。
                             any_success = any(r.success for r in results)
                             if any_success:
                                 agent.last_decision_at = now_dt
@@ -655,24 +684,98 @@ class SimulationEngine:
             for evt in events:
                 session.add(evt)
             await session.commit()
+        # 同步内存 ORM 对象，保证 snapshot() / get_simulation() 返回最新值
+        if self._simulation is not None:
+            self._simulation.current_step = self._step
+            self._simulation.world_time = self._world_time
+
+        # 事件统一出口：每条 WorldEvent 通过事件总线分发给 EventRouter，
+        # 由 Router 触发 Observer 埋点 / 未来的 memory / task 分发。
+        bus = get_event_bus()
+        for evt in events:
+            try:
+                await bus.publish(
+                    WORLD_EVENT_TOPIC,
+                    {
+                        "id": evt.id,
+                        "simulation_id": evt.simulation_id,
+                        "event_type": evt.event_type,
+                        "source": evt.source,
+                        "actor_entity_id": evt.actor_entity_id,
+                        "target_entity_id": evt.target_entity_id,
+                        "location_id": evt.location_id,
+                        "scene_id": evt.scene_id,
+                        "description": evt.description,
+                        "importance": evt.importance,
+                        "payload": evt.payload,
+                        "created_at": iso(evt.created_at),
+                    },
+                )
+            except Exception:
+                logger.debug("world event publish failed", exc_info=True)
+
+        # Redis 热写：同步 agent runtime + scene active_entities 供 Redis 直读。
+        await self._sync_runtime_cache(entity_updates)
+
+    async def _sync_runtime_cache(
+        self, entity_updates: list[AgentRuntimeState]
+    ) -> None:
+        if not entity_updates:
+            return
+        redis = get_redis()
+        # 按场景聚合
+        scene_members: dict[str, list[str]] = {}
+        for upd in entity_updates:
+            try:
+                await redis.set_json(
+                    key_agent_runtime(upd.agent_id),
+                    {
+                        "agent_id": upd.agent_id,
+                        "scene_id": upd.scene_id,
+                        "x": upd.position.x,
+                        "y": upd.position.y,
+                        "state": upd.state,
+                        "emotion": upd.emotion,
+                        "facing": upd.facing,
+                        "energy": upd.energy,
+                        "hunger": upd.hunger,
+                        "updated_at": iso(upd.updated_at),
+                    },
+                    ttl_seconds=300,
+                )
+            except Exception:
+                continue
+            scene_members.setdefault(upd.scene_id, []).append(upd.agent_id)
+        for scene_id, members in scene_members.items():
+            try:
+                await redis.set_add(
+                    key_scene_active_entities(scene_id),
+                    *members,
+                    ttl_seconds=300,
+                )
+            except Exception:
+                continue
 
     async def _broadcast_delta(
         self, entity_updates: list[AgentRuntimeState], events: list[WorldEvent]
     ) -> None:
-        if not entity_updates and not events:
-            return
+        # 每个 tick 都广播，保证前端世界时钟实时更新，即使当轮无实体变化也推送
+        # 递增 delta 序号：前端可以检测乱序与丢失（§14.5）
+        self._delta_seq = getattr(self, "_delta_seq", 0) + 1
         payload = SimulationDeltaPayload(
             step=self._step,
             world_time=self._world_time,
             entity_updates=entity_updates,
             events=[WorldEventSchema.model_validate(e) for e in events],
         )
+        data = payload.model_dump(mode="json")
+        data["seq"] = self._delta_seq
         await get_event_bus().publish(
             WS_BROADCAST_TOPIC,
             {
                 "simulation_id": self._sim_id(),
                 "type": "simulation.delta",
-                "payload": payload.model_dump(mode="json"),
+                "payload": data,
             },
         )
 
@@ -708,6 +811,42 @@ class SimulationEngine:
     async def reload_from_db(self) -> None:
         async with self._session_factory() as session:
             await self._load_state(session)
+
+    # ------------------------------------------------------------------
+    # 异步任务投递（阶段 12 §6）
+    # ------------------------------------------------------------------
+
+    async def _enqueue_decision_task(self, agent_id: str, now_dt: datetime) -> None:
+        """把 agent_decision 投递到 TaskQueue。
+
+        - 幂等 key：``agent_decision:{agent_id}:{simulation_step}``，同一步同一 agent 不会重复入库。
+        - 主循环**不等待**任务执行结果；即使任务 failed，规则兜底早已给出即时行为。
+        - 任务完成后 worker 的工具调用会改写 AgentState / AgentAction，
+          下一轮 world tick 通过 ``reload_from_db`` 或状态同步感知。
+        """
+        from app.domain.tasks.queue import get_task_queue
+
+        queue = get_task_queue()
+        if queue is None:
+            return
+        agent = self._agents.get(agent_id)
+        if agent is None or agent.is_player:
+            return
+        await queue.enqueue(
+            task_type="agent_decision",
+            payload={
+                "agent_id": agent_id,
+                "simulation_id": self._sim_id(),
+                "world_time": now_dt.isoformat(),
+            },
+            entity_id=agent_id,
+            simulation_id=self._sim_id(),
+            simulation_step=self._step,
+            priority=5,
+            deadline_seconds=60.0,
+        )
+        agent.last_decision_at = now_dt
+        agent.dirty = True
 
     # ------------------------------------------------------------------
     # 反思 / 日结

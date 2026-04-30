@@ -4,6 +4,7 @@ from fastapi import APIRouter
 
 from app.api.routes_agents import router as agents_router
 from app.api.routes_memory import router as memory_router
+from app.api.routes_observability import health_router, router as observability_router
 from app.api.routes_player import router as player_router
 from app.api.routes_simulation import router as simulation_router
 from app.api.routes_world import router as world_router
@@ -14,3 +15,5 @@ api_router.include_router(agents_router)
 api_router.include_router(player_router)
 api_router.include_router(simulation_router)
 api_router.include_router(memory_router)
+api_router.include_router(observability_router)
+api_router.include_router(health_router)

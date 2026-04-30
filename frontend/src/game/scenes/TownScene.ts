@@ -323,26 +323,45 @@ export class TownScene extends Phaser.Scene {
   }
 
   private renderObjects(dataset: SceneDataset): void {
+    const kenney = this.manifests?.tilesets.tilesets.kenney_tiny_town;
+
     for (const obj of dataset.objects) {
-      const w = (obj.size?.width ?? 1) * DISPLAY_TILE;
-      const h = (obj.size?.height ?? 1) * DISPLAY_TILE;
-      const color = obj.blocks_movement ? 0x3d3529 : 0xc9bfa4;
-      const rect = this.add.rectangle(
-        obj.position.x * DISPLAY_TILE + w / 2,
-        obj.position.y * DISPLAY_TILE + h / 2,
-        w - 4,
-        h - 4,
-        color,
-        0.75,
-      );
-      rect.setStrokeStyle(1, 0x000000, 0.25);
-      rect.setData("objectId", obj.id);
-      rect.setInteractive({ useHandCursor: true });
-      rect.on("pointerdown", (_p: Phaser.Input.Pointer, _x: number, _y: number, event?: Phaser.Types.Input.EventData) => {
+      const objW = obj.size?.width ?? 1;
+      const objH = obj.size?.height ?? 1;
+      const w = objW * DISPLAY_TILE;
+      const h = objH * DISPLAY_TILE;
+      const cx = obj.position.x * DISPLAY_TILE;
+      const cy = obj.position.y * DISPLAY_TILE;
+
+      const tileFrame = typeof obj.state?.tile_frame === "number" ? (obj.state.tile_frame as number) : undefined;
+      const stateColor = typeof obj.state?.color === "number" ? (obj.state.color as number) : undefined;
+
+      const onClick = (_p: Phaser.Input.Pointer, _x: number, _y: number, event?: Phaser.Types.Input.EventData) => {
         event?.stopPropagation();
         eventBus.emit({ type: "player.click_object", payload: { objectId: obj.id } });
-      });
-      this.objectLayer.add(rect);
+      };
+
+      // 1×1 对象且有 tile_frame → 用 Kenney tileset 瓦片渲染
+      if (tileFrame !== undefined && objW === 1 && objH === 1 && kenney && this.textures.exists(KENNEY_TILE_KEY) && tileFrame < kenney.total) {
+        const img = this.add.image(cx, cy, KENNEY_TILE_KEY, tileFrame);
+        img.setOrigin(0, 0);
+        img.setDisplaySize(DISPLAY_TILE, DISPLAY_TILE);
+        img.setData("objectId", obj.id);
+        img.setInteractive({ useHandCursor: true });
+        img.on("pointerdown", onClick);
+        this.objectLayer.add(img);
+      } else {
+        // 彩色矩形：优先用 state.color，次选根据是否阻挡的默认色
+        const defaultColor = obj.blocks_movement ? 0x3d3529 : 0xc9bfa4;
+        const color = stateColor ?? defaultColor;
+        const alpha = obj.blocks_movement ? 0.85 : 0.75;
+        const rect = this.add.rectangle(cx + w / 2, cy + h / 2, w - 4, h - 4, color, alpha);
+        rect.setStrokeStyle(1, 0x000000, 0.3);
+        rect.setData("objectId", obj.id);
+        rect.setInteractive({ useHandCursor: true });
+        rect.on("pointerdown", onClick);
+        this.objectLayer.add(rect);
+      }
     }
   }
 

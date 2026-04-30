@@ -17,10 +17,13 @@ import re
 from datetime import datetime
 from typing import Iterable
 
+from datetime import timedelta
+
 from sqlalchemy import desc, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.logging import get_logger
+from app.core.redis_client import get_redis, key_short_memory
 from app.core.time import utcnow
 from app.db.models import Memory
 from app.llm.embedding import get_embedding_service
@@ -30,6 +33,8 @@ from app.schemas.memory import (
     MemorySearchRequest,
     MemorySearchResult,
 )
+
+SHORT_TERM_TTL_SECONDS = 3600 * 24  # 24 小时（与方案 §5 对齐）
 
 logger = get_logger(__name__)
 
@@ -104,8 +109,12 @@ class MemoryService:
         evidence_memory_ids: list[str] | None = None,
         emotional_valence: float = 0.0,
         commit: bool = True,
+        defer_embedding: bool = True,
     ) -> Memory:
         now = utcnow()
+        ttl_expires_at = None
+        if scope == "short_term":
+            ttl_expires_at = now + timedelta(seconds=SHORT_TERM_TTL_SECONDS)
         mem = Memory(
             agent_id=agent_id,
             memory_type=memory_type,
@@ -119,6 +128,7 @@ class MemoryService:
             keywords=keywords or [],
             evidence_memory_ids=evidence_memory_ids or [],
             created_at=now,
+            ttl_expires_at=ttl_expires_at,
         )
         session.add(mem)
         if commit:
@@ -127,7 +137,47 @@ class MemoryService:
         else:
             await session.flush()
 
-        # 非阻塞地尝试补 embedding
+        # Redis 短期记忆镜像（§13 键空间）：方便 query 不命中 Postgres 时也能召回
+        if scope in {"short_term", "working"}:
+            try:
+                await get_redis().list_push(
+                    key_short_memory(agent_id),
+                    {
+                        "memory_id": mem.id,
+                        "description": description,
+                        "importance": mem.importance,
+                        "memory_type": memory_type,
+                        "created_at": now.isoformat(),
+                    },
+                    max_len=50,
+                    ttl_seconds=SHORT_TERM_TTL_SECONDS,
+                )
+            except Exception:
+                pass
+
+        # Embedding：
+        # - defer_embedding=True（默认）：投递 ``write_memory_embedding`` 任务，
+        #   让 worker 异步补算，避免写路径阻塞在网络（§12 §8）。
+        # - 若任务队列不可用（模块未启动），立即 inline 尝试一次。
+        if defer_embedding:
+            try:
+                from app.domain.tasks.queue import get_task_queue
+
+                queue = get_task_queue()
+                if queue is not None:
+                    await queue.enqueue(
+                        task_type="write_memory_embedding",
+                        payload={"memory_id": mem.id},
+                        entity_id=agent_id,
+                        idempotency_extra=mem.id,
+                        max_retries=2,
+                        deadline_seconds=60.0,
+                    )
+                    return mem
+            except Exception:
+                logger.debug("enqueue embedding task failed", exc_info=True)
+
+        # Fallback inline embedding
         try:
             emb_service = get_embedding_service()
             vector = await emb_service.embed(description)

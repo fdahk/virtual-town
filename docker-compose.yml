@@ -50,7 +50,33 @@ services:
         condition: service_healthy
     volumes:
       - ./backend:/app
+    # 阶段 12：API 进程只负责 enqueue，消费由下面独立的 `worker` 容器跑 RQ worker。
     command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+    restart: unless-stopped
+
+  # RQ worker：消费 `agent_decision / write_memory_embedding / daily_reflection` 等
+  # 异步任务（见 docs/实施方案/MVP开发任务拆分.md §12、事件系统与任务调度方案 §2）。
+  # 扩容直接调 `docker compose up --scale worker=N`；每个副本自动竞争消费。
+  worker:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: vt_worker
+    env_file:
+      - .env
+    environment:
+      POSTGRES_HOST: postgres
+      REDIS_HOST: redis
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      backend:
+        condition: service_started
+    volumes:
+      - ./backend:/app
+    command: python -m app.domain.tasks.worker
     restart: unless-stopped
 
   frontend:

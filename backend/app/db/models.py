@@ -339,18 +339,183 @@ class DialogueMessage(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 
 
+# ---------------------------------------------------------------------------
+# 异步任务队列（阶段 12）
+# ---------------------------------------------------------------------------
+
+
+class Task(Base, TimestampMixin):
+    """异步任务记录（agent_decision / daily_plan / embedding / reflection / ...）。
+
+    - ``idempotency_key`` 规范：``{task_type}:{entity_id}:{simulation_step}``，
+      保证同一仿真步 + 同一实体的任务不会被重复投递。
+    - ``payload`` 中存业务参数 + ``trace`` 快照，供 worker 恢复 trace 上下文。
+    - 完整生命周期：``pending → running → succeeded / failed / timeout / cancelled``。
+    """
+
+    __tablename__ = "tasks"
+    __table_args__ = (
+        UniqueConstraint("idempotency_key", name="uq_tasks_idempotency_key"),
+        Index("ix_tasks_status_enqueued_at", "status", "enqueued_at"),
+        Index("ix_tasks_type_status", "task_type", "status"),
+    )
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True, default=_uuid)
+    task_type: Mapped[str] = mapped_column(String(48), nullable=False)
+    status: Mapped[str] = mapped_column(String(16), nullable=False, default="pending")
+    priority: Mapped[int] = mapped_column(Integer, nullable=False, default=5)
+    entity_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    simulation_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    simulation_step: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    idempotency_key: Mapped[str] = mapped_column(String(128), nullable=False)
+    payload: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False, default=dict)
+    result: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
+    retry_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    max_retries: Mapped[int] = mapped_column(Integer, nullable=False, default=2)
+    deadline_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    enqueued_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    trace_id: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+
+
+class TaskStatusLog(Base):
+    """任务状态变迁审计日志（14.2）。"""
+
+    __tablename__ = "task_status_log"
+    __table_args__ = (
+        Index("ix_task_status_log_task_created", "task_id", "created_at"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    task_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    from_status: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    to_status: Mapped[str] = mapped_column(String(16), nullable=False)
+    retry_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    trace_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False
+    )
+
+
+# ---------------------------------------------------------------------------
+# 可观测性（阶段 14.2）
+# ---------------------------------------------------------------------------
+
+
+class ObservabilityEvent(Base):
+    """统一观测事件流：跨模块 span / log / error / audit。
+
+    业务代码不直接写这张表，而是通过 ``app.services.observer.Observer`` 埋点。
+    """
+
+    __tablename__ = "observability_events"
+    __table_args__ = (
+        Index("ix_obs_events_created", "created_at"),
+        Index("ix_obs_events_trace", "trace_id"),
+        Index("ix_obs_events_sim_created", "simulation_id", "created_at"),
+        Index("ix_obs_events_category", "category", "created_at"),
+    )
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True, default=_uuid)
+    simulation_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    trace_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    span_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    parent_span_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    category: Mapped[str] = mapped_column(String(32), nullable=False)
+    event_type: Mapped[str] = mapped_column(String(64), nullable=False)
+    level: Mapped[str] = mapped_column(String(8), nullable=False, default="INFO")
+    title: Mapped[str | None] = mapped_column(String(256), nullable=True)
+    entity_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    player_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    task_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    world_step: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    world_time: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    duration_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    payload: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False, default=dict)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
+class LLMCallRecord(Base):
+    """LLM 调用审计（14.2）。敏感信息（prompt 全文、api key）默认不记录。"""
+
+    __tablename__ = "llm_calls"
+    __table_args__ = (
+        Index("ix_llm_calls_created", "created_at"),
+        Index("ix_llm_calls_trace", "trace_id"),
+        Index("ix_llm_calls_model", "model", "created_at"),
+    )
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True, default=_uuid)
+    trace_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    span_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    simulation_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    agent_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    provider: Mapped[str] = mapped_column(String(32), nullable=False)
+    model: Mapped[str] = mapped_column(String(64), nullable=False)
+    prompt_template_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    prompt_version: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    caller_module: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    input_summary: Mapped[str | None] = mapped_column(Text, nullable=True)
+    token_estimate: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    latency_ms: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    retry_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    success: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    schema_valid: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    fallback_used: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    error_code: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
+class ToolCallRecord(Base):
+    """Tool calling 审计（14.2）。"""
+
+    __tablename__ = "tool_calls"
+    __table_args__ = (
+        Index("ix_tool_calls_created", "created_at"),
+        Index("ix_tool_calls_trace", "trace_id"),
+        Index("ix_tool_calls_tool", "tool", "created_at"),
+        Index("ix_tool_calls_agent", "caller_agent_id", "created_at"),
+    )
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True, default=_uuid)
+    trace_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    span_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    simulation_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    tool: Mapped[str] = mapped_column(String(64), nullable=False)
+    caller_agent_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    entity_type: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    arguments: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False, default=dict)
+    schema_valid: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    permission_valid: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    world_state_valid: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    success: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    duration_ms: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    result_summary: Mapped[str | None] = mapped_column(Text, nullable=True)
+    error_code: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    source: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
 __all__ = [
     "Agent",
     "AgentAction",
     "AgentState",
     "DialogueMessage",
+    "LLMCallRecord",
     "Location",
     "MapScene",
     "MapTile",
     "Memory",
+    "ObservabilityEvent",
     "Portal",
     "Relationship",
     "Simulation",
+    "Task",
+    "TaskStatusLog",
+    "ToolCallRecord",
     "WorldEvent",
     "WorldObject",
 ]
