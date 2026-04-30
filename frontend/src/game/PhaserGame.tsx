@@ -39,8 +39,19 @@ export function PhaserGame({ onReady }: Props) {
       // scene.events (shortcut to sys.events) is only wired up after Phaser
       // finishes booting (ScenePlugin.boot). Wait for the READY event before
       // subscribing to scene lifecycle events.
+      //
+      // Guard: React Strict Mode mounts effects twice (mount → cleanup →
+      // mount). Cleanup destroys game1 but its async READY/CREATE events can
+      // still fire. Without the guard, game1's stale onReady() call sets
+      // sceneReady=true; game2's subsequent call is a no-op and the tile-load
+      // effect never re-runs. The guard ensures only the currently active game
+      // (gameRef.current) triggers onReady.
       game.events.once(Phaser.Core.Events.READY, () => {
-        scene.events.once(Phaser.Scenes.Events.CREATE, () => onReady(scene));
+        if (gameRef.current !== game) return;
+        scene.events.once(Phaser.Scenes.Events.CREATE, () => {
+          if (gameRef.current !== game) return;
+          onReady(scene);
+        });
       });
     };
 

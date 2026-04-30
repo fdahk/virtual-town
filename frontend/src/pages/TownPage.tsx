@@ -28,14 +28,16 @@ export function TownPage() {
 
   useEffect(() => {
     (async () => {
-      const [agents, scenes, sim] = await Promise.all([
+      const [agents, scenes, sim, me] = await Promise.all([
         api.listAgents(),
         api.listScenes(),
         api.getCurrentSimulation(),
+        api.getMe().catch(() => null),
       ]);
       store.setAgents(agents);
       store.setScenes(scenes);
       store.setSimulation(sim);
+      if (me) store.setPlayer(me);
       const state = await api.getSimulationState(sim.id);
       store.setRuntimeStates(state.entities);
       const events = await api.listSimulationEvents(sim.id, 80);

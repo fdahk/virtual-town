@@ -21,7 +21,13 @@ from typing import Any
 
 def _parse_time(value: str) -> time:
     hh, mm = value.split(":")
-    return time(int(hh), int(mm))
+    h = int(hh)
+    # "24:00" is a conventional way to denote end-of-day midnight in schedule
+    # data. Python's time() rejects hour=24, so normalise to 00:00 (midnight).
+    # pick_current_slot's cross-midnight branch handles start > end correctly.
+    if h == 24:
+        return time(0, 0)
+    return time(h, int(mm))
 
 
 @dataclass(slots=True)
