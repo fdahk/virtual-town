@@ -120,6 +120,14 @@ class Settings(BaseSettings):
     # 高优先级任务的紧迫度阈值（≥ 此值时硬拒绝其他请求）
     interaction_high_priority_threshold: int = Field(default=8)
 
+    # 阶段 19++：世界事件 → 记忆投影
+    # 设为 False 可彻底关闭事件→记忆投影（如压测时减负）
+    memory_projection_enabled: bool = Field(default=True)
+    # 不在白名单内的事件，importance ≥ 此阈值才投影成记忆
+    memory_projection_default_min_importance: int = Field(default=4)
+    # 同一 (actor, event_type, target) 组合的默认去重窗口（仿真分钟）
+    memory_projection_default_debounce_minutes: int = Field(default=30)
+
     # 阶段 19+：基础需求自然演化（每仿真分钟的增量；0 表示不演化）
     # social_need 满 = 1.0；阈值默认 0.55，意味着大约 6 小时游戏时间从 0.3 升到 0.55
     needs_social_growth_per_minute: float = Field(default=0.0010)

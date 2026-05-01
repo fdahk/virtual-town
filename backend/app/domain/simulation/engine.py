@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import asyncio
 import random
+import time
 from collections import deque
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
@@ -29,6 +30,7 @@ from app.core.logging import get_logger
 from app.core.redis_client import (
     get_redis,
     key_agent_runtime,
+    key_agent_unreachable,
     key_scene_active_entities,
 )
 from app.core.time import iso, utcnow
@@ -55,9 +57,12 @@ from app.domain.simulation.natural_events import (
 from app.domain.simulation.rule_agent import (
     AgentDecision,
     NaturalWorldContext,
+    _find_inter_scene_route,
+    _find_portal_from_to,
     decide_animal_action,
     decide_human_action,
 )
+from app.domain.world.grid import SceneGrid, astar
 from app.domain.world.scene_cache import get_scene_cache
 from app.schemas.agent import AgentRuntimeState
 from app.schemas.simulation import (
@@ -107,6 +112,11 @@ class EngineAgent:
     interruptible: bool = True
     current_priority: int = 0
     last_social_at: datetime | None = None
+    # 阶段 19+++：主动追踪某个目标 NPC（go_to_entity 工具设置）。
+    # 设置后引擎每 tick 会刷新到目标的路径；到达 ≤4 格距离时自动清除并立即重新决策，
+    # 让 LLM/玩家在下一轮发起 request_interaction。
+    pursuing_entity_id: str | None = None
+    pursuing_reason: str | None = None
 
 
 @dataclass
@@ -164,11 +174,21 @@ class SimulationEngine:
         # 自然事件系统：WorldObject 内存缓存 + 全局天气
         self._objects: dict[str, EngineObject] = {}
         self._weather: WeatherState = WeatherState()
+        # 自然事件跨 tick 去重表（key → 上次触发的世界时间）。
+        # 引擎长期持有，每 tick 传入 NaturalEventContext，避免事件每帧刷屏。
+        self._natural_event_debounce: dict[str, datetime] = {}
         # 阶段 19+：基础需求演化与自主社交邂逅
         self._last_needs_evolve_at: datetime | None = None
         self._last_encounter_scan_at: datetime | None = None
         # 邂逅冷却：agent_id → 上次主动发起邂逅的世界时间
         self._encounter_cooldown_until: dict[str, datetime] = {}
+        # 阶段 19++：决策不可达兜底
+        # 规则/LLM 决策中标注 "stuck" + unreachable_location_id 时，
+        # 引擎把该 (agent, location) 加入待写黑名单，下个 tick 末统一推送 Redis。
+        self._pending_unreachable: dict[str, set[str]] = {}
+        # 引擎内存中的本地黑名单镜像（agent_id → {location_id: expires_at_real_time}），
+        # 用于规则决策时快速查询，TTL 与 Redis 保持一致（5 分钟）。
+        self._unreachable_local: dict[str, dict[str, float]] = {}
 
     # ------------------------------------------------------------------
     # 生命周期
@@ -387,6 +407,10 @@ class SimulationEngine:
 
         # 阶段 19+：基础需求随时间演化（驱动 LLM 主动选 socialize / have_meal / rest_at）
         self._evolve_basic_needs(now_dt)
+
+        # 阶段 19+++：刷新主动追踪（go_to_entity 工具发起）
+        # —— 必须放在路径推进之后、决策之前，防止决策清掉 pursuit path
+        self._refresh_pursuits()
 
         # 4. AI Decision Tick（每个 Agent 独立按游戏分钟间隔决策）
         await self._decide_all(now_dt)
@@ -700,6 +724,12 @@ class SimulationEngine:
                 if agent.state in {"WORKING", "EATING", "RESTING"}:
                     agent.state = "IDLE"
                     agent.dirty = True
+            # 阶段 19+++：正在主动追踪某个 NPC（go_to_entity）→ 不参与决策
+            # 否则规则/LLM 都会重新算自己的日程路径，把 pursuit 路径清掉。
+            # 到达后 _refresh_pursuits 会清除 pursuing_entity_id 并把
+            # last_decision_at 重置为 None，下个 tick 自然进入决策。
+            if agent.pursuing_entity_id is not None:
+                continue
             # 每个 Agent 独立检查自身的决策冷却时间
             if (
                 agent.last_decision_at is not None
@@ -783,6 +813,7 @@ class SimulationEngine:
                         grids=grids,
                         portals_by_scene=self._portals_by_scene,
                         natural_ctx=natural_ctx,
+                        unreachable_location_ids=self._get_unreachable_locations(agent.id),
                     )
             except Exception:
                 logger.exception("decide failed for %s", agent.id)
@@ -792,7 +823,19 @@ class SimulationEngine:
     def _apply_decision(
         self, agent: EngineAgent, decision: AgentDecision, now_dt: datetime
     ) -> None:
-        agent.last_decision_at = now_dt
+        meta = decision.metadata or {}
+        # 决策声明 stuck（结构性失败如"无路通往目标场景"/"路径不可达"）：
+        # 1) 把不可达目标加入 Redis 黑名单，下次 LLM/规则决策会避开；
+        # 2) 不写 last_decision_at，让下一 tick 立即重新决策（而不是等 ai_tick_minutes）。
+        stuck = bool(meta.get("stuck"))
+        unreachable_loc = meta.get("unreachable_location_id") if isinstance(meta, dict) else None
+        if unreachable_loc:
+            self._enqueue_unreachable(agent.id, str(unreachable_loc))
+        if not stuck:
+            agent.last_decision_at = now_dt
+        else:
+            # 结构性失败 → 立即重试（不更新 last_decision_at）
+            agent.last_decision_at = None
         agent.current_goal = decision.description or agent.current_goal
         agent.dirty = True
         if decision.path:
@@ -842,9 +885,16 @@ class SimulationEngine:
             sim_id=self._sim_id(),
             rng=self._rng,
             weather=self._weather,
+            persistent_debounce=self._natural_event_debounce,
         )
         new_events = _tick_natural_all(ctx)
         self._pending_events.extend(new_events)
+        # 偶尔清理一下 debounce 表，避免无限增长（保留最近 24 仿真小时内的项）
+        if len(self._natural_event_debounce) > 2000:
+            cutoff = now_dt - timedelta(hours=24)
+            self._natural_event_debounce = {
+                k: v for k, v in self._natural_event_debounce.items() if v >= cutoff
+            }
 
     def _primary_outdoor_scene_id(self) -> str | None:
         """返回第一个存在 Agent 的室外场景 ID，用于自然事件的主场景。"""
@@ -1130,6 +1180,58 @@ class SimulationEngine:
 
         # Redis 热写：同步 agent runtime + scene active_entities 供 Redis 直读。
         await self._sync_runtime_cache(entity_updates)
+        # 阶段 19++：把本 tick 累计的不可达目标推到 agent:{id}:unreachable
+        await self._flush_unreachable_to_redis()
+
+    def _enqueue_unreachable(self, agent_id: str, location_id: str) -> None:
+        """同 tick 内累计 stuck 决策标注的不可达 location，每 tick 末刷到 Redis。"""
+        if not agent_id or not location_id:
+            return
+        self._pending_unreachable.setdefault(agent_id, set()).add(location_id)
+        # 同步写入内存镜像，TTL 5 分钟（与 Redis 一致）。
+        self._unreachable_local.setdefault(agent_id, {})[location_id] = (
+            time.monotonic() + 300.0
+        )
+
+    def _get_unreachable_locations(self, agent_id: str) -> set[str]:
+        """返回当前 agent 的本地不可达黑名单（已剔除过期项）。"""
+        bucket = self._unreachable_local.get(agent_id)
+        if not bucket:
+            return set()
+        now = time.monotonic()
+        expired = [k for k, exp in bucket.items() if exp <= now]
+        for k in expired:
+            bucket.pop(k, None)
+        return set(bucket.keys())
+
+    async def _flush_unreachable_to_redis(self) -> None:
+        """把当前 tick 收集到的不可达目标推到 ``agent:{id}:unreachable``（TTL 5 分钟）。
+
+        与 ``app/llm/tools/world_tools.py`` 中 LLM 路径的写入语义一致：
+        在 ai_tick 内 stuck 决策不会反复触发同一 wait（因为已经被加入黑名单），
+        ai_decision/rule_agent 下一轮挑选目标时会先过滤掉这些 id。
+        """
+        if not self._pending_unreachable:
+            return
+        ttl = 300
+        redis = get_redis()
+        try:
+            for agent_id, loc_ids in self._pending_unreachable.items():
+                if not loc_ids:
+                    continue
+                try:
+                    await redis.set_add(
+                        key_agent_unreachable(agent_id),
+                        *sorted(loc_ids),
+                        ttl_seconds=ttl,
+                    )
+                except Exception:
+                    logger.debug(
+                        "flush unreachable to redis failed for %s", agent_id,
+                        exc_info=True,
+                    )
+        finally:
+            self._pending_unreachable.clear()
 
     async def _sync_runtime_cache(
         self, entity_updates: list[AgentRuntimeState]
@@ -1215,6 +1317,201 @@ class SimulationEngine:
 
     def get_agent(self, agent_id: str) -> EngineAgent | None:
         return self._agents.get(agent_id)
+
+    # ------------------------------------------------------------------
+    # 阶段 19+++：主动追踪 / 寻人 API（被 ``go_to_entity`` 工具调用）
+    # ------------------------------------------------------------------
+
+    def start_pursuit(
+        self,
+        agent_id: str,
+        target_entity_id: str,
+        *,
+        reason: str = "",
+    ) -> dict[str, Any]:
+        """让 NPC 主动前往某个 NPC 当前所在地。
+
+        - 跨场景：通过 ``_find_inter_scene_route`` BFS 找到第一跳的 portal，
+          A* 走到 portal；到达后自然触发 portal 自动传送，下个 tick 继续追踪。
+        - 同场景：A* 到目标当前位置的相邻可走格。
+        - 设置 ``pursuing_entity_id`` → 引擎每 tick 刷新路径，跟随目标移动；
+          距离 ≤ 2 时自动清除并立即重决策（让 LLM 触发 ``request_interaction``）。
+
+        返回 ``{"ok": bool, "reason": str, "scene": ..., "x": ..., "y": ...}``。
+        失败原因：``TARGET_NOT_FOUND`` / ``UNREACHABLE`` / ``ALREADY_THERE``。
+        """
+        agent = self._agents.get(agent_id)
+        target = self._agents.get(target_entity_id)
+        if agent is None:
+            return {"ok": False, "reason": "AGENT_NOT_FOUND"}
+        if target is None or target.is_player:
+            return {"ok": False, "reason": "TARGET_NOT_FOUND"}
+        if agent_id == target_entity_id:
+            return {"ok": False, "reason": "INVALID_ARGUMENTS"}
+
+        # 已经够近，直接跳过移动
+        if (
+            agent.scene_id == target.scene_id
+            and abs(agent.x - target.x) + abs(agent.y - target.y) <= 2
+        ):
+            agent.pursuing_entity_id = None
+            agent.pursuing_reason = None
+            return {
+                "ok": True,
+                "reason": "ALREADY_THERE",
+                "scene": target.scene_id,
+                "x": target.x,
+                "y": target.y,
+            }
+
+        path = self._compute_pursuit_path(agent, target)
+        if not path:
+            return {
+                "ok": False,
+                "reason": "UNREACHABLE",
+                "scene": target.scene_id,
+                "x": target.x,
+                "y": target.y,
+            }
+
+        agent.path = list(path)
+        # 防止把自身当前格再走一遍
+        if agent.path and agent.path[0] == (agent.x, agent.y):
+            agent.path.pop(0)
+        agent.state = "MOVING" if agent.path else "INTERACTING"
+        agent.pursuing_entity_id = target_entity_id
+        agent.pursuing_reason = reason or f"去找 {target.name}"
+        agent.current_goal = agent.pursuing_reason
+        # 立即冻结自动决策（避免 ai_tick 把 path 清掉）；到达后 _refresh_pursuits 重置
+        agent.last_decision_at = self._world_time
+        agent.dirty = True
+        return {
+            "ok": True,
+            "reason": "OK",
+            "scene": target.scene_id,
+            "x": target.x,
+            "y": target.y,
+            "hops": len(agent.path),
+        }
+
+    def stop_pursuit(self, agent_id: str) -> None:
+        agent = self._agents.get(agent_id)
+        if agent is None:
+            return
+        agent.pursuing_entity_id = None
+        agent.pursuing_reason = None
+
+    def _compute_pursuit_path(
+        self, agent: EngineAgent, target: EngineAgent
+    ) -> list[tuple[int, int]] | None:
+        """为 ``agent`` 计算前往 ``target`` 当前所在地的下一段路径。
+
+        - 同场景：A* 到目标的最近可走邻格。
+        - 跨场景：A* 到本场景通往中转/目标场景的 portal。
+        """
+        scene_cache = get_scene_cache()
+        grid = scene_cache.get_grid(agent.scene_id)
+        if grid is None:
+            return None
+
+        if agent.scene_id == target.scene_id:
+            return self._astar_to_neighbor(grid, (agent.x, agent.y), (target.x, target.y))
+
+        # 跨场景：找下一跳 portal 的 from_tile，然后 A* 过去
+        portal_tile = _find_portal_from_to(
+            self._portals_by_scene, agent.scene_id, target.scene_id
+        )
+        if portal_tile is None:
+            route = _find_inter_scene_route(
+                self._portals_by_scene, agent.scene_id, target.scene_id
+            )
+            if not route:
+                return None
+            portal_tile = _find_portal_from_to(
+                self._portals_by_scene, agent.scene_id, route[0]
+            )
+        if portal_tile is None:
+            return None
+        path = astar(grid, (agent.x, agent.y), portal_tile, avoid_hazards=True)
+        return path or None
+
+    @staticmethod
+    def _astar_to_neighbor(
+        grid: SceneGrid,
+        start: tuple[int, int],
+        target: tuple[int, int],
+    ) -> list[tuple[int, int]] | None:
+        """A* 到目标的最近可走邻格；目标本身不可走时退回到 4 邻域中第一个可走点。"""
+        if start == target:
+            return []
+        # 优先尝试目标周围 4 邻域
+        candidates: list[tuple[int, int]] = []
+        for dx, dy in ((1, 0), (-1, 0), (0, 1), (0, -1)):
+            nx, ny = target[0] + dx, target[1] + dy
+            if grid.is_walkable(nx, ny, avoid_hazards=True):
+                candidates.append((nx, ny))
+        # 若邻域全堵，再试目标本身（一般 NPC 站在可走格）
+        if grid.is_walkable(*target, avoid_hazards=True):
+            candidates.append(target)
+        if not candidates:
+            return None
+        # 选距离起点最近的候选
+        candidates.sort(key=lambda c: abs(c[0] - start[0]) + abs(c[1] - start[1]))
+        for c in candidates:
+            path = astar(grid, start, c, avoid_hazards=True)
+            if path:
+                return path
+        return None
+
+    def _refresh_pursuits(self) -> None:
+        """每 tick 刷新所有 ``pursuing_entity_id != None`` 的 NPC：
+
+        - 目标已消失 / 距离≤2 / 处在不同场景但已无路径 → 清除 pursuit。
+        - 路径走空但未到达 → 重新计算（处理目标在移动）。
+        - 否则保持当前 path 不动，等待下一格走完。
+        """
+        for agent in self._agents.values():
+            if agent.is_player or agent.pursuing_entity_id is None:
+                continue
+            if agent.state == "CHATTING":
+                # 已经在聊天 → 追踪目标完成，清掉
+                agent.pursuing_entity_id = None
+                agent.pursuing_reason = None
+                continue
+            target = self._agents.get(agent.pursuing_entity_id)
+            if target is None or target.is_player:
+                agent.pursuing_entity_id = None
+                agent.pursuing_reason = None
+                continue
+            if (
+                agent.scene_id == target.scene_id
+                and abs(agent.x - target.x) + abs(agent.y - target.y) <= 2
+            ):
+                # 抵达目标附近：清 pursuit + 立即重决策（让 LLM 触发 chat 请求）
+                agent.pursuing_entity_id = None
+                agent.pursuing_reason = None
+                agent.last_decision_at = None
+                agent.path = []
+                agent.state = "IDLE"
+                agent.dirty = True
+                continue
+            if agent.path:
+                # 还在路上，让现有路径走完
+                continue
+            # 路径空了 → 重新规划（目标可能换了场景或位置）
+            new_path = self._compute_pursuit_path(agent, target)
+            if not new_path:
+                # 目标短期不可达：放弃 pursuit + 加入位置黑名单 + 立即重决策
+                agent.pursuing_entity_id = None
+                agent.pursuing_reason = None
+                agent.last_decision_at = None
+                agent.dirty = True
+                continue
+            agent.path = list(new_path)
+            if agent.path and agent.path[0] == (agent.x, agent.y):
+                agent.path.pop(0)
+            agent.state = "MOVING" if agent.path else "IDLE"
+            agent.dirty = True
 
     # ------------------------------------------------------------------
     # 物品生命周期 API（被 player_service / 自然事件 / 任务系统调用）

@@ -534,7 +534,48 @@ decide_with_llm 把每个候选用 importance.compute_importance 重新打分后
 | `NPC_DIALOG_MAX_TURNS` | 10 | NPC-NPC 对话最大轮次 |
 | `INTERACTION_HIGH_PRIORITY_THRESHOLD` | 8 | 目标当前任务紧迫度 ≥ 此值 → 硬拒 |
 
-### 10.6 验收（手动观察 / 日志）
+### 10.6 世界事件 → 个人记忆投影器（阶段 19++）
+
+之前 NPC 看到的"事情"（公告、火灾、暴风雨警告、动物互动……）只是在 WS / 观测流里飘过，
+没有任何地方把它写进 NPC 自己的记忆 → 决策时 retrieve 不到 → "我看到了告示牌但
+什么也没记住"。新增 `app/domain/memory/event_projector.py` 修这一刀：
+
+```text
+WorldEvent 落库后 → bus.publish(WORLD_EVENT_TOPIC) →
+   ├─ Observer.record_event   （审计流，旧逻辑）
+   └─ project_world_event_to_memory（新增）
+            ├─ 黑名单过滤（agent.action_started / dialogue.* / interaction.* / ...）
+            ├─ 白名单事件 → 指定 memory_type / importance / 去重窗口
+            └─ 默认 importance ≥ 阈值才投影成 thought 记忆
+```
+
+**白名单事件 → 记忆**（部分摘录，全集见 `_EVENT_RULES`）：
+
+| event_type | memory_type | importance | 默认去重（仿真分钟） |
+|------------|-------------|------------|----------------------|
+| `world.sign_noticed` | event | 4 | 360 |
+| `world.storm_warning` | event | 6 | 60 |
+| `world.scene_changed` | event | 2 | 30 |
+| `world.hazard_triggered` | event | 7 | 5 |
+| `world.fire_started` | event | 5 | 30 |
+| `world.object_interacted` | event | 3 | 30 |
+| `nature.fish_caught` / `fruit_picked` / `mushroom_picked` | event | 3 | 30 |
+| `agent.interacted` / `animal.reacted` | event | 3 | 5 |
+
+**黑名单**（高频、非感知性事件）：`agent.action_*`, `dialogue.*`, `interaction.*`,
+`world.object_state_changed`, `weather.condition_changed`, `world.object_spawned`...
+这些要么是工具自身已经写过记忆，要么是噪声。
+
+**去重**：用 `(actor_id, event_type, target_id)` 作为 key，Redis `SET NX EX`
+保证 API 与 worker 进程并发安全；Redis 不可用时退化到进程内 dict。
+
+**配套修复**（自然事件源头）：`NoticeEventHandler` / `StormShelterEventHandler`
+之前用 `ctx.already_seen()`，但 `NaturalEventContext` 每 tick 重建，`world_time.hour`
+键也只在同一 tick 起作用 → NPC 站在告示牌附近时**每 world tick 都生成一条事件**
+（5 Hz × 多 NPC = 一秒 N 条刷屏）。新增 `recently_seen(key, minutes=...)` 跨 tick 去重，
+告示牌 6 仿真小时一次，暴风雨警告 1 仿真小时一次。
+
+### 10.7 验收（手动观察 / 日志）
 
 启动一段时间后应能在前端 / 数据库观察到：
 
@@ -542,4 +583,9 @@ decide_with_llm 把每个候选用 importance.compute_importance 重新打分后
 2. `interaction_requests` 表出现 `status=accepted` 的行，且 `reason` 含"自然邂逅"或工具理由。
 3. `dialogue_messages` 表出现 `meta.source=npc_dialogue_loop` 的对话行。
 4. `memories` 表中 `memory_type=chat` 且 `keywords` 含 "socialize" / 对方 name 的记录持续增长。
-5. WS 流中 `interaction.*` / `dialogue.npc_to_npc_message` / `dialogue.npc_to_npc_ended` 事件按节奏出现。
+5. `memories` 表中 `memory_type=event` 出现 `keywords` 含 "sign" / "fire" / "storm" / "interact"
+   的记录（来自世界事件投影器）。
+6. WS 事件流中同一 NPC × 同一告示牌不再每秒刷屏 `world.sign_noticed`，至少
+   6 仿真小时间隔一次。
+7. 后续 LLM 决策的 prompt 里 "相关记忆" 段不再总是 `- 暂无相关记忆`，而是出现
+   "我注意到告示牌：..." / "我和 X 聊了聊" 这类条目。

@@ -93,11 +93,45 @@ def _find_portal_from_to(
     from_scene: str,
     to_scene: str,
 ) -> tuple[int, int] | None:
-    """找到从 from_scene 到 to_scene 的 portal，返回 from_tile 坐标。"""
+    """找到从 from_scene 到 to_scene 的直连 portal，返回 from_tile 坐标。"""
     for portal in portals_by_scene.get(from_scene, []):
         if portal.to_scene_id == to_scene:
             ft = portal.from_tile or {}
             return int(ft.get("x", 0)), int(ft.get("y", 0))
+    return None
+
+
+def _find_inter_scene_route(
+    portals_by_scene: dict[str, list[Any]],
+    from_scene: str,
+    to_scene: str,
+    *,
+    max_hops: int = 4,
+) -> list[str] | None:
+    """BFS 跨场景路由：返回 ``[next_scene, ..., to_scene]``（不含起点）。
+
+    针对"室内场景 → 通过 outdoor 中转 → 另一室内场景"这种典型布局：
+    - `school_inside → outdoor → cafe_inside` 时，单跳查找会失败导致 NPC 僵死，
+      BFS 能找到完整链路并返回 `[outdoor, cafe_inside]`。
+    - 没有可达路径时返回 None。
+    """
+    if from_scene == to_scene:
+        return []
+    visited: set[str] = {from_scene}
+    queue: deque[tuple[str, list[str]]] = deque([(from_scene, [])])
+    while queue:
+        cur, path = queue.popleft()
+        if len(path) >= max_hops:
+            continue
+        for portal in portals_by_scene.get(cur, []):
+            nxt = portal.to_scene_id
+            if nxt in visited:
+                continue
+            new_path = path + [nxt]
+            if nxt == to_scene:
+                return new_path
+            visited.add(nxt)
+            queue.append((nxt, new_path))
     return None
 
 
@@ -182,6 +216,7 @@ def decide_human_action(
     grids: dict[str, SceneGrid],
     portals_by_scene: dict[str, list[Any]] | None = None,
     natural_ctx: NaturalWorldContext | None = None,
+    unreachable_location_ids: set[str] | None = None,
 ) -> AgentDecision:
     """
     人类 NPC 规则决策。
@@ -190,9 +225,14 @@ def decide_human_action(
     1. 暴风雨自保（storm_active）→ 跑向最近室内
     2. 火灾响应（nearby_fires）→ 按性格决定救援/逃离/围观
     3. 正常日程（schedule_template）
+
+    参数 ``unreachable_location_ids``：引擎传入本 agent 当前的不可达目标黑名单
+    （由近期 stuck 决策聚合而成，TTL 5 分钟）。命中黑名单时会跳过该日程槽位，
+    转为在当前场景漫游，避免反复回到同一个无法到达的目标。
     """
     _portals = portals_by_scene or {}
     nat = natural_ctx or NaturalWorldContext()
+    blacklist = unreachable_location_ids or set()
 
     # ── 1. 暴风雨优先逃入建筑 ────────────────────────────────────────────────
     if nat.storm_active:
@@ -208,23 +248,54 @@ def decide_human_action(
 
     tpl: list[dict[str, Any]] = agent_row.schedule_template or []
     slot = pick_current_slot(tpl, world_time.time())
-    goal = _choose_goal_tile_for_slot(slot.location_id if slot else None, locations)
+    slot_loc = slot.location_id if slot else None
+    if slot_loc and slot_loc in blacklist:
+        # 当前日程目标被标记为不可达 → 不再尝试，转为现场漫游
+        return _wander_within_scene_or_wait(
+            state_row, grids, rng=random.Random(state_row.x * 31 + state_row.y),
+            description=f"目标 {slot_loc} 暂时不可达，先在附近闲逛",
+        )
+    goal = _choose_goal_tile_for_slot(slot_loc, locations)
     if goal is None:
-        return AgentDecision(action_type="wait", description="闲着")
+        # 没有日程目标：在当前场景漫游一会儿，避免长期僵直
+        return _wander_within_scene_or_wait(
+            state_row, grids, rng=random.Random(state_row.x * 31 + state_row.y),
+            description="日程间隙，随便走走",
+        )
 
     target_scene, target_tile = goal
     grid_current = grids.get(state_row.scene_id)
 
     # ------------------------------------------------------------------
-    # 跨场景：先走到当前场景的 portal 入口
+    # 跨场景：先走到当前场景的 portal 入口（支持多跳中转）
     # ------------------------------------------------------------------
     if target_scene != state_row.scene_id:
+        # 1) 直连优先，2) 直连不存在 → BFS 找多跳路径
         portal_tile = _find_portal_from_to(_portals, state_row.scene_id, target_scene)
+        next_scene_for_portal = target_scene
         if portal_tile is None:
-            return AgentDecision(action_type="wait", description="无路通往目标场景")
+            route = _find_inter_scene_route(_portals, state_row.scene_id, target_scene)
+            if route:
+                next_scene_for_portal = route[0]
+                portal_tile = _find_portal_from_to(
+                    _portals, state_row.scene_id, next_scene_for_portal
+                )
+
+        if portal_tile is None:
+            # 完全没路（异常拓扑 / 缺数据）→ 不再死等：标记不可达 + 在当前场景漫游
+            return _wander_within_scene_or_wait(
+                state_row, grids,
+                rng=random.Random(state_row.x * 31 + state_row.y),
+                description="目标场景暂时无路可达，先在附近转转",
+                stuck_target_location_id=slot.location_id if slot else None,
+            )
 
         if grid_current is None:
-            return AgentDecision(action_type="wait", description="等待世界加载")
+            return AgentDecision(
+                action_type="wait",
+                description="等待世界加载",
+                metadata={"stuck": True},
+            )
 
         start = (state_row.x, state_row.y)
         if start == portal_tile:
@@ -241,12 +312,13 @@ def decide_human_action(
             return _make_recovery_or_wait(
                 grid_current, start,
                 description="绕行中，寻找建筑入口",
-                wait_description="无法抵达建筑入口，等待",
+                wait_description="无法抵达建筑入口，先在附近转转",
+                stuck_target_location_id=slot.location_id if slot else None,
             )
         return AgentDecision(
             action_type="move_to_location",
             description=slot.description if slot else "前往目的地",
-            target_scene_id=target_scene,
+            target_scene_id=next_scene_for_portal,
             target_position=target_tile,
             target_location_id=slot.location_id if slot else None,
             path=path,
@@ -257,7 +329,10 @@ def decide_human_action(
     # 同场景
     # ------------------------------------------------------------------
     if grid_current is None:
-        return AgentDecision(action_type="wait", description="等待世界加载")
+        return AgentDecision(
+            action_type="wait", description="等待世界加载",
+            metadata={"stuck": True},
+        )
 
     start = (state_row.x, state_row.y)
     if start == target_tile:
@@ -272,7 +347,8 @@ def decide_human_action(
         return _make_recovery_or_wait(
             grid_current, start,
             description="绕行寻路中",
-            wait_description="路径不可达，等待",
+            wait_description="路径暂时不可达，先在附近转转",
+            stuck_target_location_id=slot.location_id if slot else None,
         )
     return AgentDecision(
         action_type="move_to_location",
@@ -389,10 +465,14 @@ def _make_recovery_or_wait(
     *,
     description: str,
     wait_description: str,
+    stuck_target_location_id: str | None = None,
 ) -> AgentDecision:
     """
     尝试 BFS 找一个可走的邻格让 NPC 移出死区；
     完全走不通时才返回 wait。
+
+    返回 ``wait`` 时打上 ``metadata.stuck=True``（若 ``stuck_target_location_id``
+    给出，会被引擎加入不可达黑名单 + 立即重试，避免长期僵在 WAITING）。
     """
     recovery = _recovery_tile_bfs(grid, origin, max_radius=5)
     if recovery is not None:
@@ -405,7 +485,63 @@ def _make_recovery_or_wait(
                 path=path,
                 duration_ticks=len(path),
             )
-    return AgentDecision(action_type="wait", description=wait_description)
+    metadata: dict[str, Any] = {"stuck": True}
+    if stuck_target_location_id:
+        metadata["unreachable_location_id"] = stuck_target_location_id
+    return AgentDecision(
+        action_type="wait", description=wait_description, metadata=metadata,
+    )
+
+
+def _wander_within_scene_or_wait(
+    state_row: Any,
+    grids: dict[str, SceneGrid],
+    *,
+    rng: random.Random,
+    description: str,
+    stuck_target_location_id: str | None = None,
+    radius: int = 5,
+) -> AgentDecision:
+    """日程目标暂时不可达时的兜底：在当前场景内挑一个可走的随机格漫步。
+
+    相比 ``wait``，至少 NPC 在动 → 可能撞见别人触发邂逅、进入新位置触发感知事件。
+    """
+    grid = grids.get(state_row.scene_id)
+    if grid is None:
+        metadata = {"stuck": True}
+        if stuck_target_location_id:
+            metadata["unreachable_location_id"] = stuck_target_location_id
+        return AgentDecision(
+            action_type="wait", description="等待世界加载", metadata=metadata,
+        )
+    origin = (state_row.x, state_row.y)
+    goal = _random_walkable(grid, rng, radius=radius, origin=origin)
+    if goal is None or goal == origin:
+        metadata = {"stuck": True}
+        if stuck_target_location_id:
+            metadata["unreachable_location_id"] = stuck_target_location_id
+        return AgentDecision(
+            action_type="wait", description=description, metadata=metadata,
+        )
+    path = astar(grid, origin, goal, avoid_hazards=True)
+    if not path:
+        return _make_recovery_or_wait(
+            grid, origin,
+            description=description, wait_description=description,
+            stuck_target_location_id=stuck_target_location_id,
+        )
+    return AgentDecision(
+        action_type="wander",
+        description=description,
+        target_position=goal,
+        path=path,
+        duration_ticks=len(path),
+        metadata=(
+            {"unreachable_location_id": stuck_target_location_id}
+            if stuck_target_location_id
+            else {}
+        ),
+    )
 
 
 # ---------------------------------------------------------------------------

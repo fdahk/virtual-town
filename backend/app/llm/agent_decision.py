@@ -476,7 +476,7 @@ async def _social_block(
         except Exception:
             minutes_since = None
 
-    # 同场景附近熟人 top-3
+    # 全部熟人（familiarity > 0.2）+ 当前位置；排前 5 给 LLM
     rels_rows = (
         await session.execute(
             select(Relationship).where(
@@ -486,45 +486,70 @@ async def _social_block(
         )
     ).scalars().all()
     rel_by_target = {r.to_entity_id: r for r in rels_rows}
-
-    nearby_states = (
-        await session.execute(
-            select(AgentState).where(
-                AgentState.scene_id == state.scene_id,
-                AgentState.agent_id != agent.id,
+    if not rel_by_target:
+        nearby_friends_block = "- 附近暂无熟人"
+        global_friends_block = "- 你目前还没有特别熟的人，可以主动认识陌生人"
+    else:
+        # 同场景的熟人按距离排序（最多 3 人）；不同场景的熟人按好感度排序（最多 3 人）
+        target_ids = list(rel_by_target.keys())
+        states_rows = (
+            await session.execute(
+                select(AgentState).where(AgentState.agent_id.in_(target_ids))
             )
-        )
-    ).scalars().all()
+        ).scalars().all()
+        agents_rows = (
+            await session.execute(select(Agent).where(Agent.id.in_(target_ids)))
+        ).scalars().all()
+        agents_by_id = {a.id: a for a in agents_rows}
 
-    friends: list[tuple[str, str, float]] = []
-    for st in nearby_states:
-        rel = rel_by_target.get(st.agent_id)
-        if rel is None:
-            continue
-        other = await session.get(Agent, st.agent_id)
-        if other is None or other.entity_type not in {"human", "player"}:
-            continue
-        friends.append((st.agent_id, other.name, float(rel.familiarity)))
-    friends.sort(key=lambda f: f[2], reverse=True)
-    friends = friends[:3]
+        nearby: list[tuple[str, str, float, int]] = []
+        far: list[tuple[str, str, float, str]] = []
+        for st in states_rows:
+            other = agents_by_id.get(st.agent_id)
+            if other is None or other.entity_type not in {"human", "player"}:
+                continue
+            rel = rel_by_target[st.agent_id]
+            fam = float(rel.familiarity)
+            if st.scene_id == state.scene_id:
+                dist = abs(st.x - state.x) + abs(st.y - state.y)
+                nearby.append((st.agent_id, other.name, fam, dist))
+            else:
+                far.append((st.agent_id, other.name, fam, st.scene_id))
+        nearby.sort(key=lambda t: (t[3], -t[2]))
+        far.sort(key=lambda t: -t[2])
+        if nearby:
+            items = ", ".join(
+                f"{name}({fid}, fam={fam:.2f}, dist={dist})"
+                for fid, name, fam, dist in nearby[:3]
+            )
+            nearby_friends_block = f"- 同场景熟人：{items}"
+        else:
+            nearby_friends_block = "- 同场景暂无熟人"
+        if far:
+            items = ", ".join(
+                f"{name}({fid}, fam={fam:.2f}, scene={scene})"
+                for fid, name, fam, scene in far[:3]
+            )
+            global_friends_block = f"- 别处的熟人：{items}（如想见面，可调用 go_to_entity）"
+        else:
+            global_friends_block = "- 暂无外场景熟人"
 
     lines: list[str] = []
     lines.append(
         f"- 社交需求：{need:.2f}（阈值 {threshold:.2f}，"
-        f"{'高于阈值，可考虑发起社交' if need >= threshold else '低于阈值，不急'}）"
+        f"{'高于阈值，建议发起社交' if need >= threshold else '低于阈值，不急'}）"
     )
     if minutes_since is not None:
         lines.append(f"- 距离上次社交：{minutes_since} 仿真分钟")
     else:
         lines.append("- 还没有过社交记录")
-    if friends:
-        items = ", ".join(f"{name}({fid}, fam={fam:.2f})" for fid, name, fam in friends)
-        lines.append(f"- 附近熟人 top3：{items}")
-    else:
-        lines.append("- 附近暂无熟人")
+    lines.append(nearby_friends_block)
+    lines.append(global_friends_block)
     lines.append(
-        "- 提示：若你想找人聊天，可调用 socialize（自动选择对象）或 "
-        "request_interaction（指定 target_entity_id）。"
+        "- 工具提示："
+        "socialize（自动从附近挑人发起 chat）/ "
+        "request_interaction（向身边 ≤4 格的实体发起 chat/help/trade）/ "
+        "go_to_entity（先把自己派去某个 NPC 那里，到了再发 request_interaction）。"
     )
     return "\n".join(lines)
 

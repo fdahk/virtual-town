@@ -57,6 +57,16 @@ async def route_world_event(payload: dict[str, Any]) -> None:
     except Exception:
         logger.exception("route_world_event observer record failed")
 
+    # 阶段 19++：把"NPC 看到/经历的"事件投影到个人记忆。
+    # 没有 actor_entity_id 的环境事件会被投影器自身忽略；执行失败被吞掉，
+    # 不影响事件总线后续订阅（WS 广播不依赖此步）。
+    try:
+        from app.domain.memory.event_projector import project_world_event_to_memory
+
+        await project_world_event_to_memory(payload)
+    except Exception:
+        logger.exception("route_world_event memory projection failed")
+
 
 def subscribe_event_router() -> None:
     """在应用启动时调用，订阅事件总线的 world event 主题。"""

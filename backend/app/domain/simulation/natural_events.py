@@ -95,13 +95,34 @@ class NaturalEventContext:
     rng: random.Random
     weather: WeatherState     # 引用；WeatherEventHandler 直接修改其字段
     _debounce: set[str] = field(default_factory=set)
+    # 跨 tick 的长期去重表：key → 上一次触发的世界时间。
+    # 引擎层会传入一个长期持有的 dict，避免每 tick 重置导致的事件刷屏。
+    persistent_debounce: dict[str, datetime] = field(default_factory=dict)
 
     def already_seen(self, *parts: str) -> bool:
-        """防止同一 tick 同一对象对重复触发（如 NPC-Sign 同帧双重感知）。"""
+        """防止同一 tick 同一对象对重复触发（如 NPC-Sign 同帧双重感知）。
+
+        仅做单 tick 去重；跨 tick 抑制请用 ``recently_seen``。
+        """
         key = "|".join(parts)
         if key in self._debounce:
             return True
         self._debounce.add(key)
+        return False
+
+    def recently_seen(self, key: str, *, minutes: float) -> bool:
+        """跨 tick 长期去重：在最近 ``minutes`` 仿真分钟内是否已触发过同 key。
+
+        - 首次触发：写入时间戳并返回 False（"未见过"）。
+        - 已在窗口内：返回 True，调用方应跳过。
+        - 超过窗口：刷新时间戳，返回 False（重新允许触发）。
+        """
+        last = self.persistent_debounce.get(key)
+        if last is not None:
+            elapsed = (self.world_time - last).total_seconds() / 60.0
+            if elapsed < minutes:
+                return True
+        self.persistent_debounce[key] = self.world_time
         return False
 
 
@@ -601,13 +622,15 @@ class NoticeEventHandler(NaturalEventHandler):
             for agent in self._near_agents(obj, ctx, radius=SIGN_NOTICE_DIST):
                 if agent.is_player:
                     continue
-                key = f"sign|{agent.id}|{obj.id}|{ctx.world_time.hour}"
-                if ctx.already_seen(key):
+                # 跨 tick 长期去重：同一 NPC × 同一告示牌每 360 仿真分钟（≈6 小时）
+                # 才会再次产生"注意到"事件，避免站在告示牌附近时每 tick 刷屏。
+                key = f"sign|{agent.id}|{obj.id}"
+                if ctx.recently_seen(key, minutes=360):
                     continue
                 events.append(self._evt(
                     ctx, event_type="world.sign_noticed",
-                    description=f"{agent.name} 注意到告示牌：{notice_text[:40]}",
-                    actor=agent.id, target=obj.id, importance=2,
+                    description=f"{agent.name} 注意到告示牌：{notice_text[:60]}",
+                    actor=agent.id, target=obj.id, importance=4,
                     payload={
                         "agent_id": agent.id,
                         "sign_id": obj.id,
@@ -637,8 +660,9 @@ class StormShelterEventHandler(NaturalEventHandler):
         for agent in self._scene_agents(ctx):
             if agent.state == "SLEEPING":
                 continue
-            key = f"storm_shelter|{agent.id}|{ctx.world_time.hour}"
-            if ctx.already_seen(key):
+            # 暴风雨警告：每个 NPC 每仿真小时最多触发一次（跨 tick 去重）
+            key = f"storm_shelter|{agent.id}"
+            if ctx.recently_seen(key, minutes=60):
                 continue
             events.append(self._evt(
                 ctx, event_type="world.storm_warning",

@@ -42,6 +42,7 @@ ToolExecutor 在执行前会拒绝不在授权列表里的工具调用并返回 
 | `request_interaction`  | dialogue  | ✅ | ❌ | ✅ | `social_tools.py`（阶段 19）|
 | `socialize`            | dialogue  | ✅ | ❌ | ❌ | `social_tools.py`（阶段 19）|
 | `end_chat`             | dialogue  | ✅ | ❌ | ✅ | `social_tools.py`（阶段 19）|
+| `go_to_entity`         | dialogue  | ✅ | ❌ | ❌ | `social_tools.py`（阶段 19+++：跨场景前往某 NPC + 移动追踪） |
 | `work_at_location`     | life      | ✅ | ❌ | ❌ | `life_tools.py`（阶段 19）|
 | `have_meal`            | life      | ✅ | ❌ | ❌ | `life_tools.py`（阶段 19）|
 | `rest_at`              | life      | ✅ | ❌ | ❌ | `life_tools.py`（阶段 19）|
@@ -353,6 +354,56 @@ interface ToolContext {
   "target_entity_id": "npc_xiaowang"
 }
 ```
+
+---
+
+### 5.6 go_to_entity（阶段 19+++）
+
+用途：让 NPC 主动前往指定 NPC 当前所在地（跨场景 + 移动追踪）。区别于
+`request_interaction`：后者要求目标已经在身边 4 格内；前者用来**把 NPC 派
+过去**，让"想找谁就找谁"成为现实，社交不再受同场景限制。
+
+行为细节：
+
+- 引擎读取目标当前 `(scene_id, x, y)`，跨场景则通过 `_find_inter_scene_route`
+  BFS 找第一跳 portal，A* 走过去；到达 portal 后由 `auto_enter` 自动传送，
+  下个 tick `_refresh_pursuits` 继续规划下一段。
+- 目标在移动 → path 走空时自动重新规划，实现"追踪"。
+- 距离 ≤ 2 格 → 自动清除 `pursuing_entity_id`，把 `last_decision_at` 重置为
+  None；下个 AI tick LLM 立即进入决策，再调用 `request_interaction` 发起聊天。
+- pursuit 期间 `_decide_all` 跳过该 NPC，避免规则/LLM 重选目标清掉 path。
+
+参数：
+
+```json
+{
+  "target_entity_id": "npc_xiaowang",
+  "reason": "想找他聊聊代码"
+}
+```
+
+返回（成功）：
+
+```json
+{
+  "target_entity_id": "npc_xiaowang",
+  "scene": "scene_cafe_inside",
+  "x": 7,
+  "y": 5,
+  "hops": 9,
+  "status": "OK"
+}
+```
+
+错误码：
+
+| code | 含义 |
+|------|------|
+| `INVALID_ARGUMENTS` | target 是自己 / 缺字段 |
+| `TARGET_NOT_FOUND`  | target 不存在 / 是玩家 / 非人类 NPC |
+| `UNREACHABLE`       | 当前拓扑下找不到任何 portal 链或路径，会同步把 target_id 写入 `agent:{id}:unreachable`（5 分钟黑名单） |
+
+`memory_candidates` 写入一条 `thought` 记忆："我准备去 X 那里 ——{reason}"。
 
 ---
 

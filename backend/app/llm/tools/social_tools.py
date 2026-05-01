@@ -457,5 +457,136 @@ class SocializeTool(Tool):
         )
 
 
+# ---------------------------------------------------------------------------
+# go_to_entity（主动追踪：跨场景前往某个 NPC）
+# ---------------------------------------------------------------------------
+
+
+class _GoToEntityArgs(BaseModel):
+    target_entity_id: str
+    reason: str = Field(default="", max_length=200)
+
+
+class GoToEntityTool(Tool):
+    """`go_to_entity`：派 NPC 前往指定 NPC 的当前位置（跨场景 + 实时追踪）。
+
+    与 ``request_interaction`` 的差异：
+    - ``request_interaction`` 要求目标在身边 4 格内，否则 ``OUT_OF_RANGE``；
+    - ``go_to_entity`` 不需要目标在视野内，引擎会基于当前 (scene, x, y)
+      规划跨场景路径，目标移动时每 tick 自动重新规划，到达 ≤2 格距离时
+      自动清除追踪并立刻让 LLM 重新决策 → 此时再调用 ``request_interaction``。
+
+    适用场景：``social_need`` 高、想找的熟人不在同场景；或者要"过去打个招呼"。
+    """
+
+    name = "go_to_entity"
+
+    def spec(self) -> ToolSpec:
+        return ToolSpec(
+            name=self.name,
+            description=(
+                "前往指定 NPC 当前所在地（跨场景 + 移动追踪）。到达后会自动停下，"
+                "下一轮决策时再调用 request_interaction 发起聊天 / 帮忙等请求。"
+            ),
+            owner_module="dialogue",
+            allowed_entity_types=["human"],
+            parameters_schema={
+                "type": "object",
+                "properties": {
+                    "target_entity_id": {
+                        "type": "string",
+                        "description": "想要前往的 NPC id。",
+                    },
+                    "reason": {
+                        "type": "string",
+                        "description": "前往动机（写进 NPC 当前目标）。",
+                    },
+                },
+                "required": ["target_entity_id"],
+            },
+            rerun_on_failure=False,
+        )
+
+    async def execute(self, ctx: ToolContext, call: ToolCall) -> ToolResult:
+        try:
+            args = _GoToEntityArgs.model_validate(call.arguments)
+        except ValidationError as e:
+            return self.fail(call, "INVALID_ARGUMENTS", str(e))
+
+        if args.target_entity_id == ctx.agent_id:
+            return self.fail(call, "INVALID_ARGUMENTS", "cannot pursue yourself")
+
+        target_state = await ctx.session.get(AgentState, args.target_entity_id)
+        if target_state is None:
+            return self.fail(
+                call, "TARGET_NOT_FOUND", f"agent {args.target_entity_id} not found"
+            )
+        target_agent = await ctx.session.get(Agent, args.target_entity_id)
+        if target_agent is None or target_agent.entity_type != "human":
+            return self.fail(call, "TARGET_NOT_FOUND", "target is not a human NPC")
+
+        from app.services.simulation_runtime import get_simulation_runtime
+
+        try:
+            engine = get_simulation_runtime().engine
+        except Exception:
+            return self.fail(call, "INTERNAL_ERROR", "engine not running")
+
+        outcome = engine.start_pursuit(
+            ctx.agent_id,
+            args.target_entity_id,
+            reason=args.reason or f"去找 {target_agent.name}",
+        )
+        if not outcome.get("ok"):
+            reason = outcome.get("reason", "UNKNOWN")
+            # UNREACHABLE 同时把目标加进 agent 的不可达黑名单（与 stuck 决策共享一个 key）
+            if reason == "UNREACHABLE":
+                try:
+                    from app.core.redis_client import get_redis, key_agent_unreachable
+
+                    await get_redis().set_add(
+                        key_agent_unreachable(ctx.agent_id),
+                        args.target_entity_id,
+                        ttl_seconds=300,
+                    )
+                except Exception:
+                    pass
+            return self.fail(
+                call,
+                reason if reason in {"TARGET_NOT_FOUND", "INVALID_ARGUMENTS"} else "UNREACHABLE",
+                f"start_pursuit failed: {reason}",
+                retryable=(reason == "UNREACHABLE"),
+            )
+
+        memory_candidates = [
+            {
+                "memory_type": "thought",
+                "scope": "short_term",
+                "description": f"我准备去 {target_agent.name} 那里 —— {args.reason or '想找他/她聊聊'}",
+                "importance": 3,
+                "keywords": [target_agent.name, "go_to_entity", "pursuit"],
+            }
+        ]
+
+        return ToolResult(
+            tool=call.tool,
+            success=True,
+            result={
+                "target_entity_id": args.target_entity_id,
+                "scene": outcome.get("scene"),
+                "x": outcome.get("x"),
+                "y": outcome.get("y"),
+                "hops": outcome.get("hops", 0),
+                "status": outcome.get("reason"),
+            },
+            memory_candidates=memory_candidates,
+        )
+
+
 def build_tools() -> Iterable[Tool]:
-    return [RequestInteractionTool(), EndChatTool(), SocializeTool()]
+    return [
+        RequestInteractionTool(),
+        EndChatTool(),
+        SocializeTool(),
+        GoToEntityTool(),
+    ]
