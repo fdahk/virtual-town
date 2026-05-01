@@ -518,6 +518,9 @@ def _serialize_tool_call(r: ToolCallRecord) -> dict[str, Any]:
 
 
 def _serialize_task(r: Task) -> dict[str, Any]:
+    trace_meta: dict[str, Any] = {}
+    if isinstance(r.payload, dict) and "__trace__" in r.payload:
+        trace_meta = r.payload["__trace__"] or {}
     return {
         "id": r.id,
         "task_type": r.task_type,
@@ -530,6 +533,7 @@ def _serialize_task(r: Task) -> dict[str, Any]:
         "retry_count": r.retry_count,
         "max_retries": r.max_retries,
         "trace_id": r.trace_id,
+        "parent_trace_id": trace_meta.get("parent_trace_id"),
         "last_error": r.last_error,
         "payload": {k: v for k, v in (r.payload or {}).items() if k != "__trace__"},
         "result": r.result,

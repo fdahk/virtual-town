@@ -381,7 +381,7 @@ function TracesView() {
           </div>
         </div>
       )}
-      {traceId && <TraceDetail traceId={traceId} />}
+      {traceId && <TraceDetail traceId={traceId} onNavigate={setTraceId} />}
     </div>
   );
 }

@@ -81,6 +81,7 @@ export interface TaskRecord {
   retry_count: number;
   max_retries: number;
   trace_id: string | null;
+  parent_trace_id: string | null;
   last_error: string | null;
   payload: Record<string, unknown>;
   result: Record<string, unknown> | null;

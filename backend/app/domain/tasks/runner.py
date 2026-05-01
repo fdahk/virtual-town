@@ -181,6 +181,44 @@ async def _execute_task(task_id: str) -> dict[str, Any]:
         # 已终态：可能是重复投递/幂等 short-circuit
         return {"status": task.status, "idempotent": True}
 
+    # deadline 检查：任务在 RQ 队列等待期间若已超过 deadline_at，直接丢弃
+    # （不执行，标记 failed，避免执行过期的 agent_decision 等时效性任务）
+    now_ts = utcnow()
+    if task.deadline_at is not None and task.deadline_at.tzinfo is None:
+        from datetime import timezone
+        task_deadline = task.deadline_at.replace(tzinfo=timezone.utc)
+    else:
+        task_deadline = task.deadline_at
+
+    if task_deadline is not None and now_ts > task_deadline:
+        waited_secs = (now_ts - task.created_at).total_seconds() if task.created_at else 0
+        logger.warning(
+            "task_id=%s type=%s DEADLINE_EXCEEDED waited=%.1fs deadline=%s",
+            task.id,
+            task.task_type,
+            waited_secs,
+            task_deadline.isoformat(),
+        )
+        async with get_session_factory()() as _sess:
+            await _sess.execute(
+                update(Task)
+                .where(Task.id == task.id)
+                .values(
+                    status=FAILED,
+                    finished_at=now_ts,
+                    last_error=f"TASK_DEADLINE_EXCEEDED: waited {waited_secs:.1f}s",
+                )
+            )
+            await _sess.commit()
+        await get_observer().record_task_status(
+            task_id=task.id,
+            from_status=PENDING,
+            to_status=FAILED,
+            retry_count=task.retry_count,
+            message=f"deadline exceeded after {waited_secs:.1f}s in queue",
+        )
+        return {"status": FAILED, "error": "TASK_DEADLINE_EXCEEDED"}
+
     handler = registry.get(task.task_type)
     if handler is None:
         await _mark_failed(
@@ -198,6 +236,7 @@ async def _execute_task(task_id: str) -> dict[str, Any]:
         trace_id=trace_payload.get("trace_id") or task.trace_id,
         span_id=trace_payload.get("span_id"),
         parent_span_id=trace_payload.get("parent_span_id"),
+        parent_trace_id=trace_payload.get("parent_trace_id"),  # 链回触发方 trace
         simulation_id=trace_payload.get("simulation_id") or task.simulation_id,
         agent_id=trace_payload.get("agent_id") or task.entity_id,
         player_id=trace_payload.get("player_id"),

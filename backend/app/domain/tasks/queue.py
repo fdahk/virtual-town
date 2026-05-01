@@ -29,6 +29,8 @@ from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
+import uuid
+
 from app.core.config import get_settings
 from app.core.logging import get_logger
 from app.core.time import utcnow
@@ -166,9 +168,18 @@ class TaskQueue:
         )
         now = utcnow()
         snap = current_trace()
+        # 任务拥有独立 trace_id（不继承父 tick/请求的 trace）。
+        # 这样任务 trace 的 wall-clock 只反映任务自身的等待+执行耗时，
+        # 而不是从父 tick 开始到任务最终完成的跨度（可能数十分钟）。
+        # parent_trace_id 保留父 trace 的引用，用于可观测性平台追溯触发链。
+        task_trace_id = f"trace_{uuid.uuid4().hex[:12]}"
         enriched_payload = {
             **(payload or {}),
-            "__trace__": snap.as_log_extra(),
+            "__trace__": {
+                **snap.as_log_extra(),
+                "trace_id": task_trace_id,
+                "parent_trace_id": snap.trace_id,  # 链回触发方（world_tick / http 请求）
+            },
         }
 
         deadline_at = None

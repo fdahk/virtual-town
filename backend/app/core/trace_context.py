@@ -62,6 +62,10 @@ _event_id: contextvars.ContextVar[str | None] = contextvars.ContextVar(
 _category: contextvars.ContextVar[str | None] = contextvars.ContextVar(
     "vt_category", default=None
 )
+# 异步任务的父 trace_id（任务自身拥有独立 trace_id，通过此字段链回触发方）
+_parent_trace_id: contextvars.ContextVar[str | None] = contextvars.ContextVar(
+    "vt_parent_trace_id", default=None
+)
 
 
 @dataclass
@@ -72,6 +76,7 @@ class TraceSnapshot:
     trace_id: str | None = None
     span_id: str | None = None
     parent_span_id: str | None = None
+    parent_trace_id: str | None = None  # 跨 trace 链路：任务被哪个 tick/trace 触发
     simulation_id: str | None = None
     agent_id: str | None = None
     player_id: str | None = None
@@ -88,6 +93,7 @@ class TraceSnapshot:
             "trace_id": self.trace_id,
             "span_id": self.span_id,
             "parent_span_id": self.parent_span_id,
+            "parent_trace_id": self.parent_trace_id,
             "simulation_id": self.simulation_id,
             "agent_id": self.agent_id,
             "player_id": self.player_id,
@@ -111,6 +117,7 @@ def current() -> TraceSnapshot:
         trace_id=_trace_id.get(),
         span_id=_span_id.get(),
         parent_span_id=_parent_span_id.get(),
+        parent_trace_id=_parent_trace_id.get(),
         simulation_id=_simulation_id.get(),
         agent_id=_agent_id.get(),
         player_id=_player_id.get(),
@@ -267,6 +274,7 @@ class TraceContext:
             _trace_id.set(snapshot.trace_id),
             _span_id.set(snapshot.span_id),
             _parent_span_id.set(snapshot.parent_span_id),
+            _parent_trace_id.set(snapshot.parent_trace_id),
             _simulation_id.set(snapshot.simulation_id),
             _agent_id.set(snapshot.agent_id),
             _player_id.set(snapshot.player_id),
