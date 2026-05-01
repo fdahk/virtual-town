@@ -334,28 +334,49 @@ class PlayerService:
         object_id: str,
         interaction_type: str,
     ) -> PlayerInteractResponse:
-        obj = await session.get(WorldObject, object_id)
-        if obj is None:
-            raise TargetNotFound(f"object {object_id} not found")
-        if interaction_type not in (obj.available_interactions or []):
+        engine = get_simulation_runtime().engine
+        # 优先从引擎内存缓存读取（保证读到最新 state）
+        eng_obj = engine.get_object(object_id) if engine else None  # type: ignore[union-attr]
+        if eng_obj is None:
+            obj = await session.get(WorldObject, object_id)
+            if obj is None:
+                raise TargetNotFound(f"object {object_id} not found")
+            interactions = list(obj.available_interactions or [])
+            ox, oy = int((obj.position or {}).get("x", 0)), int((obj.position or {}).get("y", 0))
+            obj_name = obj.name
+            obj_state = dict(obj.state or {})
+        else:
+            interactions = list(eng_obj.available_interactions)
+            ox, oy = eng_obj.x, eng_obj.y
+            obj_name = eng_obj.name
+            obj_state = dict(eng_obj.state)
+
+        if interaction_type not in interactions:
             raise InvalidArguments(
-                f"interaction {interaction_type} not allowed on {obj.name}"
+                f"interaction {interaction_type} not allowed on {obj_name}"
             )
-        pos = obj.position or {}
-        ox, oy = int(pos.get("x", 0)), int(pos.get("y", 0))
         if abs(ox - player_eng.x) + abs(oy - player_eng.y) > INTERACTION_RADIUS:
             raise OutOfRange("too far to interact")
+
+        # ── 应用真实交互效果（修改物品 state，必要时销毁/生成新物品） ───────────
+        message, gained_item = self._apply_interaction_effect(
+            engine, eng_obj, interaction_type, player_eng, obj_state, obj_name
+        )
+
+        # 写一条交互日志事件（独立于状态变化事件）
         evt = WorldEvent(
-            simulation_id=get_simulation_runtime().engine.get_simulation().id,  # type: ignore[union-attr]
+            simulation_id=engine.get_simulation().id,  # type: ignore[union-attr]
             event_type="world.object_interacted",
             source="player",
             actor_entity_id=player_eng.id,
+            target_entity_id=object_id,
             scene_id=player_eng.scene_id,
-            description=f"{player_eng.name} 对 {obj.name} 做了 {interaction_type}",
+            description=f"{player_eng.name} 对 {obj_name} 做了 {interaction_type}",
             importance=2,
             payload={
-                "object_id": obj.id,
+                "object_id": object_id,
                 "interaction": interaction_type,
+                "gained_item": gained_item,
             },
             created_at=utcnow(),
         )
@@ -364,8 +385,100 @@ class PlayerService:
         return PlayerInteractResponse(
             success=True,
             events=[evt.id],
-            message=f"你对「{obj.name}」执行了「{interaction_type}」",
+            message=message,
         )
+
+    # ------------------------------------------------------------------
+    # 交互动词 → 实际世界状态变化的映射
+    # ------------------------------------------------------------------
+
+    def _apply_interaction_effect(
+        self,
+        engine: Any,
+        eng_obj: Any,
+        action: str,
+        player_eng: Any,
+        obj_state: dict[str, Any],
+        obj_name: str,
+    ) -> tuple[str, str | None]:
+        """
+        把交互动词映射为对世界的实际副作用：
+
+        - ``pick`` 蘑菇 → mushroom_present=False, picked_count+=1
+        - ``pick`` 成熟果实 → fruit_ripe=False
+        - ``fish`` 钓鱼点 → fishing_active 重置（上钩后该点暂歇）
+        - ``read`` 告示牌 → 仅日志
+        - 其他 → 仅日志
+
+        返回 (用户提示文案, 获得的物品名/None)。
+        """
+        if eng_obj is None:
+            return f"你对「{obj_name}」执行了「{action}」", None
+
+        # 蘑菇采摘
+        if action == "pick" and obj_state.get("mushroom_present"):
+            engine.apply_object_state_change(
+                eng_obj.id,
+                {
+                    "mushroom_present": False,
+                    "mushroom_ticks": None,
+                    "picked_count": int(obj_state.get("picked_count", 0)) + 1,
+                },
+                actor=player_eng.id,
+                description=f"{player_eng.name} 在 {obj_name} 采到了一朵蘑菇",
+                importance=2,
+                event_type="nature.mushroom_picked",
+            )
+            return f"你采到了 {obj_name} 的一朵新鲜蘑菇 🍄", "mushroom"
+
+        # 果实采摘
+        if action == "pick" and obj_state.get("fruit_ripe"):
+            engine.apply_object_state_change(
+                eng_obj.id,
+                {
+                    "fruit_ripe": False,
+                    "picked_count": int(obj_state.get("picked_count", 0)) + 1,
+                },
+                actor=player_eng.id,
+                description=f"{player_eng.name} 在 {obj_name} 摘下了一颗成熟果实",
+                importance=2,
+                event_type="nature.fruit_picked",
+            )
+            return f"你摘下了 {obj_name} 的一颗成熟果实 🍎", "fruit"
+
+        # 试图采摘但什么都没有
+        if action == "pick":
+            return f"{obj_name} 上目前没什么可采的", None
+
+        # 钓鱼：消耗活跃状态
+        if action == "fish" and obj_state.get("fishing_active"):
+            engine.apply_object_state_change(
+                eng_obj.id,
+                {"fishing_active": False, "fishing_cooldown_ticks": 60},
+                actor=player_eng.id,
+                description=f"{player_eng.name} 在 {obj_name} 钓上了一条鱼",
+                importance=2,
+                event_type="nature.fish_caught",
+            )
+            return f"你在 {obj_name} 钓上了一条鱼 🐟", "fish"
+
+        if action == "fish":
+            return f"{obj_name} 此刻没什么动静，等会儿再来吧", None
+
+        # 浇水：让花朵盛开
+        if action == "water" and "bloomed" in obj_state and not obj_state.get("bloomed"):
+            engine.apply_object_state_change(
+                eng_obj.id,
+                {"bloomed": True},
+                actor=player_eng.id,
+                description=f"{player_eng.name} 给 {obj_name} 浇了水，花儿绽放了",
+                importance=1,
+                event_type="nature.flower_bloomed",
+            )
+            return f"你给 {obj_name} 浇了水，花儿开了 🌸", None
+
+        # 其余动词只产生日志事件
+        return f"你对「{obj_name}」执行了「{action}」", None
 
     async def _interact_entity(
         self,

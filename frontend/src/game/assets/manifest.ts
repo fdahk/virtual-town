@@ -1,24 +1,45 @@
 // 资源 manifest 类型 + 加载器。严禁在业务代码里硬编码具体图片 URL。
 
+export interface EffectDef {
+  note?: string;
+  /** Phaser numeric color (0xRRGGBB) */
+  color?: number;
+  color_core?: number;
+  color_outer?: number;
+  color_smoke?: number;
+  color_cap?: number;
+  color_stem?: number;
+  alpha?: number;
+  alpha_range?: [number, number];
+  license?: string;
+}
+
+export interface TilesetEntry {
+  id: string;
+  url: string;
+  tile_width: number;
+  tile_height: number;
+  columns: number;
+  rows: number;
+  total: number;
+  display_scale: number;
+  license: string;
+  source: string;
+  author: string;
+  frame_notes?: Record<string, string>;
+}
+
 export interface TilesetManifest {
   version: string;
   tilesets: {
-    kenney_tiny_town: {
-      id: string;
-      url: string;
-      tile_width: number;
-      tile_height: number;
-      columns: number;
-      rows: number;
-      total: number;
-      display_scale: number;
-      license: string;
-      source: string;
-      author: string;
-    };
+    kenney_tiny_town: TilesetEntry;
+    kenney_tiny_dungeon?: TilesetEntry;
+    [key: string]: TilesetEntry | undefined;
   };
   terrain_map: Record<string, number>;
   overlay_tiles: Record<string, number>;
+  /** 自然事件视觉效果参数（程序化绘制） */
+  effects?: Record<string, EffectDef>;
 }
 
 export interface HumanAnimationDef {

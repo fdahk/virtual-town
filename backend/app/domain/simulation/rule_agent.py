@@ -14,12 +14,30 @@ from __future__ import annotations
 
 import random
 from collections import deque
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any
 
 from app.domain.simulation.schedule import pick_current_slot
 from app.domain.world.grid import SceneGrid, astar
+
+
+@dataclass
+class NaturalWorldContext:
+    """
+    自然环境上下文，由引擎从 EngineObject 缓存中构建后传给规则决策。
+    使用简单类型避免循环依赖（rule_agent 不导入 engine）。
+    """
+
+    weather: str = "sunny"
+    storm_active: bool = False
+    # (x, y, name) 列表
+    nearby_fires: list[tuple[int, int, str]] = field(default_factory=list)
+    nearby_fishing_spots: list[tuple[int, int, str]] = field(default_factory=list)
+    nearby_benches: list[tuple[int, int, str]] = field(default_factory=list)
+    nearby_ripe_objects: list[tuple[int, int, str]] = field(default_factory=list)
+    # (x, y, id, notice_text)
+    nearby_signs: list[tuple[int, int, str, str]] = field(default_factory=list)
 
 
 @dataclass(slots=True)
@@ -163,15 +181,30 @@ def decide_human_action(
     locations: dict[str, dict[str, Any]],
     grids: dict[str, SceneGrid],
     portals_by_scene: dict[str, list[Any]] | None = None,
+    natural_ctx: NaturalWorldContext | None = None,
 ) -> AgentDecision:
     """
     人类 NPC 规则决策。
-    - 优先跟随日程。
-    - 目标在同场景：A* 寻路，找不到路则尝试目标邻格，仍失败则小范围漫游找出路。
-    - 目标在其他场景：先寻路到当前场景的对应 portal，抵达后引擎自动传送。
-    - 无日程则待在原地。
+
+    优先级：
+    1. 暴风雨自保（storm_active）→ 跑向最近室内
+    2. 火灾响应（nearby_fires）→ 按性格决定救援/逃离/围观
+    3. 正常日程（schedule_template）
     """
     _portals = portals_by_scene or {}
+    nat = natural_ctx or NaturalWorldContext()
+
+    # ── 1. 暴风雨优先逃入建筑 ────────────────────────────────────────────────
+    if nat.storm_active:
+        override = _decide_storm_shelter(agent_row, state_row, locations, grids, _portals)
+        if override is not None:
+            return override
+
+    # ── 2. 火灾响应 ───────────────────────────────────────────────────────────
+    if nat.nearby_fires:
+        override = _decide_fire_response(agent_row, state_row, nat, grids)
+        if override is not None:
+            return override
 
     tpl: list[dict[str, Any]] = agent_row.schedule_template or []
     slot = pick_current_slot(tpl, world_time.time())
@@ -247,6 +280,104 @@ def decide_human_action(
         target_scene_id=target_scene,
         target_position=target_tile,
         target_location_id=slot.location_id if slot else None,
+        path=path,
+        duration_ticks=len(path),
+    )
+
+
+def _decide_fire_response(
+    agent_row: Any,
+    state_row: Any,
+    nat: NaturalWorldContext,
+    grids: dict[str, SceneGrid],
+) -> AgentDecision | None:
+    """
+    根据性格决定火灾响应：
+    - 勇敢(brave/courageous/hero)   → 冲向最近的火源帮助救火
+    - 胆小(cowardly/fearful/timid)  → 向反方向逃跑
+    - 其他                          → 围观（原地不动，交还日程决策）
+    """
+    personality: list[str] = agent_row.personality or []
+    brave_kw = {"brave", "courageous", "hero", "勇敢", "英雄"}
+    timid_kw = {"cowardly", "fearful", "timid", "scared", "胆小", "懦弱", "怕事"}
+
+    is_brave = any(p.lower() in brave_kw for p in personality)
+    is_timid = any(p.lower() in timid_kw for p in personality)
+
+    grid = grids.get(state_row.scene_id)
+    start = (state_row.x, state_row.y)
+    fx, fy, fname = nat.nearby_fires[0]  # 最近火源
+
+    if is_brave:
+        # 试图接近火源（勇敢角色）
+        if grid is not None:
+            path = _astar_with_fallback(grid, start, (fx, fy), fallback_radius=3)
+            if path:
+                return AgentDecision(
+                    action_type="move_to_location",
+                    description=f"勇敢地冲向 {fname} 救火",
+                    target_position=(fx, fy),
+                    path=path,
+                    duration_ticks=len(path),
+                )
+    elif is_timid:
+        # 向反方向逃跑
+        if grid is not None:
+            dx = state_row.x - fx
+            dy = state_row.y - fy
+            mag = max(abs(dx) + abs(dy), 1)
+            flee_x = state_row.x + int(dx / mag * 6)
+            flee_y = state_row.y + int(dy / mag * 6)
+            path = _astar_with_fallback(grid, start, (flee_x, flee_y), fallback_radius=4)
+            if path:
+                return AgentDecision(
+                    action_type="move_to_location",
+                    description=f"被 {fname} 的火焰吓到，拼命逃跑",
+                    target_position=(flee_x, flee_y),
+                    path=path,
+                    duration_ticks=len(path),
+                )
+    # 中立性格：围观，交还给日程决策
+    return None
+
+
+def _decide_storm_shelter(
+    agent_row: Any,
+    state_row: Any,
+    locations: dict[str, dict[str, Any]],
+    grids: dict[str, SceneGrid],
+    portals_by_scene: dict[str, list[Any]],
+) -> AgentDecision | None:
+    """暴风雨时找最近的室内地点。"""
+    indoor_locs = [
+        loc for loc in locations.values()
+        if loc.get("scene_id") != state_row.scene_id  # 在其他（室内）场景
+        and loc.get("location_type") in ("indoor", "building", "home", "cafe", "school")
+    ]
+    if not indoor_locs:
+        return None
+    # 找到 portal 通向室内
+    portal_tile = None
+    target_scene = None
+    for loc in indoor_locs:
+        portal_tile = _find_portal_from_to(portals_by_scene, state_row.scene_id, loc["scene_id"])
+        if portal_tile is not None:
+            target_scene = loc["scene_id"]
+            break
+    if portal_tile is None:
+        return None
+    grid = grids.get(state_row.scene_id)
+    if grid is None:
+        return None
+    start = (state_row.x, state_row.y)
+    path = _astar_with_fallback(grid, start, portal_tile)
+    if not path:
+        return None
+    return AgentDecision(
+        action_type="move_to_location",
+        description="暴风雨来袭，赶快躲进建筑里",
+        target_scene_id=target_scene,
+        target_position=portal_tile,
         path=path,
         duration_ticks=len(path),
     )

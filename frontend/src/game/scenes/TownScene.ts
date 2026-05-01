@@ -1,5 +1,5 @@
 import Phaser from "phaser";
-import { eventBus } from "../eventBus";
+import { eventBus, type NaturalEffectPayload } from "../eventBus";
 import {
   loadManifests,
   resolveAnimalColor,
@@ -29,6 +29,7 @@ interface SceneDataset {
 
 const DISPLAY_TILE = 32;
 const KENNEY_TILE_KEY = "kenney_tiles";
+const KENNEY_DUNGEON_KEY = "kenney_dungeon";
 
 // 兜底色（当某 terrain 既不在 Kenney 索引也不在 override 中时使用的色矩形）
 const FALLBACK_TERRAIN_COLORS: Record<string, number> = {
@@ -60,6 +61,13 @@ interface AgentNode {
   lastMoving: boolean;
 }
 
+/** 单个自然效果节点（程序化绘制，可 tween 动画）。 */
+interface EffectNode {
+  kind: string;
+  gfx: Phaser.GameObjects.Graphics | Phaser.GameObjects.Rectangle;
+  tween?: Phaser.Tweens.Tween;
+}
+
 export class TownScene extends Phaser.Scene {
   private manifests: LoadedManifests | null = null;
   private tileLayer!: Phaser.GameObjects.Container;
@@ -67,7 +75,13 @@ export class TownScene extends Phaser.Scene {
   private locationLayer!: Phaser.GameObjects.Container;
   private debugLayer!: Phaser.GameObjects.Container;
   private agentLayer!: Phaser.GameObjects.Container;
+  /** 自然事件视觉效果层（绘制在 agentLayer 之上） */
+  private effectLayer!: Phaser.GameObjects.Container;
+  /** 天气叠加层（覆盖整个视窗的半透明色彩） */
+  private weatherOverlay!: Phaser.GameObjects.Rectangle;
   private agentNodes = new Map<string, AgentNode>();
+  /** objectId → 效果节点（火焰/萤火虫/涟漪等） */
+  private effectNodes = new Map<string, EffectNode>();
   private currentSceneId: string | null = null;
   private datasetCache = new Map<string, SceneDataset>();
   private highlight: Phaser.GameObjects.Rectangle | null = null;
@@ -77,6 +91,9 @@ export class TownScene extends Phaser.Scene {
   private pendingRender: SceneDataset | null = null;
   private lastMoveAt = 0;
   private createCallback: (() => void) | null = null;
+  private progressCallback: ((value: number) => void) | null = null;
+  /** 当 React 层有 overlay（对话框、记忆查看器等）时置为 true，屏蔽所有地图交互。 */
+  private _inputBlocked = false;
 
   constructor() {
     super("TownScene");
@@ -103,10 +120,40 @@ export class TownScene extends Phaser.Scene {
     this.manifests = m;
   }
 
+  setProgressCallback(cb: (value: number) => void): void {
+    this.progressCallback = cb;
+  }
+
+  /**
+   * 当 React 侧出现 overlay（对话框、记忆查看器等）时调用 setInputBlocked(true)，
+   * overlay 关闭后调用 setInputBlocked(false)。
+   *
+   * 双重屏蔽策略：
+   *  1. Phaser 的 InputPlugin / KeyboardPlugin 关闭 → pointerdown / keydown 事件不派发
+   *  2. _inputBlocked 内部标志 → onPointerDown / onKeyDown 开头的守卫（防御性兜底）
+   *
+   * CSS 层的 pointer-events 阻断在 TownPage 的 Phaser 容器上额外叠加。
+   */
+  setInputBlocked(blocked: boolean): void {
+    this._inputBlocked = blocked;
+    this.input.enabled = !blocked;
+    if (this.input.keyboard) {
+      this.input.keyboard.enabled = !blocked;
+    }
+  }
+
+  isInputBlocked(): boolean {
+    return this._inputBlocked;
+  }
+
   preload(): void {
     this.load.once("loaderror", (f: { url?: string }) =>
       console.warn("[phaser] asset load error", f?.url),
     );
+    // 将 Phaser 内置的 0-1 加载进度上报给 React（用于进度条显示）
+    this.load.on("progress", (value: number) => {
+      this.progressCallback?.(value);
+    });
     if (!this.manifests) return;
     const m = this.manifests;
     const tiny = m.tilesets.tilesets.kenney_tiny_town;
@@ -114,6 +161,13 @@ export class TownScene extends Phaser.Scene {
       frameWidth: tiny.tile_width,
       frameHeight: tiny.tile_height,
     });
+    const dungeon = m.tilesets.tilesets.kenney_tiny_dungeon;
+    if (dungeon) {
+      this.load.spritesheet(KENNEY_DUNGEON_KEY, dungeon.url, {
+        frameWidth: dungeon.tile_width,
+        frameHeight: dungeon.tile_height,
+      });
+    }
     const humans = m.sprites.humans;
     for (const [id, url] of Object.entries(humans.sheets)) {
       this.load.spritesheet(this.humanKey(id), url, {
@@ -138,6 +192,10 @@ export class TownScene extends Phaser.Scene {
     this.objectLayer = this.add.container(0, 0);
     this.debugLayer = this.add.container(0, 0);
     this.agentLayer = this.add.container(0, 0);
+    this.effectLayer = this.add.container(0, 0);
+    // 全屏天气叠加层（默认完全透明）
+    this.weatherOverlay = this.add.rectangle(0, 0, 4096, 4096, 0x000000, 0).setOrigin(0, 0);
+    this.weatherOverlay.setDepth(1000); // 始终置顶
 
     if (this.manifests) {
       try {
@@ -157,6 +215,46 @@ export class TownScene extends Phaser.Scene {
       if (evt.type === "debug.layer.toggle") {
         this.debugState[evt.payload.layer] = evt.payload.enabled;
         this.renderDebug();
+      }
+      // 自然事件视觉效果
+      if (evt.type === "world.fire_started" || evt.type === "world.fire_spread") {
+        this.addEffect("fire", evt.payload);
+      } else if (evt.type === "world.fire_extinguished") {
+        this.removeEffect(evt.payload.object_id ?? "");
+      } else if (evt.type === "weather.condition_changed") {
+        this.applyWeatherOverlay(evt.payload.condition ?? "sunny", evt.payload.intensity ?? 0);
+      } else if (evt.type === "weather.thunder") {
+        this.flashThunder();
+      } else if (evt.type === "nature.fishing_spot_appeared") {
+        this.addEffect("fishing", evt.payload);
+      } else if (evt.type === "nature.mushroom_appeared") {
+        this.addEffect("mushroom", evt.payload);
+      } else if (evt.type === "nature.mushroom_withered") {
+        this.removeEffect(evt.payload.object_id ?? "");
+      } else if (evt.type === "nature.flower_bloomed") {
+        this.addEffect("flower", evt.payload);
+      } else if (evt.type === "nature.flower_withered") {
+        this.removeEffect(evt.payload.object_id ?? "");
+      } else if (evt.type === "nature.firefly_appeared") {
+        this.addEffect("firefly", evt.payload);
+      } else if (evt.type === "nature.bird_appeared") {
+        this.addEffect("bird", evt.payload);
+      } else if (evt.type === "nature.bird_flew_away") {
+        this.removeEffect(evt.payload.object_id ?? "");
+      } else if (evt.type === "nature.puddle_formed") {
+        this.addEffect("puddle", evt.payload);
+      } else if (evt.type === "nature.puddle_dried") {
+        this.removeEffect(evt.payload.object_id ?? "");
+      } else if (evt.type === "nature.fruit_ripened") {
+        this.addEffect("fruit", evt.payload);
+      } else if (evt.type === "nature.mushroom_picked"
+              || evt.type === "nature.fruit_picked"
+              || evt.type === "nature.fish_caught"
+              || evt.type === "world.object_despawned") {
+        // 物品被采摘/钓走/移除：清理对应的视觉叠加层
+        this.removeEffect(evt.payload.object_id ?? "");
+      } else if (evt.type === "world.storm_warning") {
+        this.applyWeatherOverlay("stormy", 1.0);
       }
     });
     this.events.once(Phaser.Scenes.Events.SHUTDOWN, () => {
@@ -181,6 +279,21 @@ export class TownScene extends Phaser.Scene {
     } else if (this.currentSceneId === null) {
       this.switchScene(dataset.scene.id, dataset.playerId ?? null);
     }
+  }
+
+  /**
+   * 局部刷新 objectLayer，不重建 tile/agent 层。
+   * 由 TownPage 在收到 world.object_state_changed / spawned / despawned 时调用。
+   */
+  refreshObjects(objects: WorldObject[]): void {
+    const sceneId = this.currentSceneId;
+    if (!sceneId) return;
+    const dataset = this.datasetCache.get(sceneId);
+    if (!dataset) return;
+    dataset.objects = objects;
+    if (!this.assetsReady) return;
+    this.objectLayer.removeAll(true);
+    this.renderObjects(dataset);
   }
 
   switchScene(sceneId: string, playerId: string | null): void {
@@ -324,45 +437,221 @@ export class TownScene extends Phaser.Scene {
 
   private renderObjects(dataset: SceneDataset): void {
     const kenney = this.manifests?.tilesets.tilesets.kenney_tiny_town;
+    const dungeon = this.manifests?.tilesets.tilesets.kenney_tiny_dungeon;
 
     for (const obj of dataset.objects) {
       const objW = obj.size?.width ?? 1;
       const objH = obj.size?.height ?? 1;
       const w = objW * DISPLAY_TILE;
       const h = objH * DISPLAY_TILE;
-      const cx = obj.position.x * DISPLAY_TILE;
-      const cy = obj.position.y * DISPLAY_TILE;
+      const px = obj.position.x * DISPLAY_TILE;
+      const py = obj.position.y * DISPLAY_TILE;
 
       const tileFrame = typeof obj.state?.tile_frame === "number" ? (obj.state.tile_frame as number) : undefined;
+      const tilesetKey = (obj.state?.tileset as string | undefined) ?? "kenney_tiny_town";
       const stateColor = typeof obj.state?.color === "number" ? (obj.state.color as number) : undefined;
+      const tags: string[] = Array.isArray(obj.tags) ? (obj.tags as string[]) : [];
 
       const onClick = (_p: Phaser.Input.Pointer, _x: number, _y: number, event?: Phaser.Types.Input.EventData) => {
         event?.stopPropagation();
         eventBus.emit({ type: "player.click_object", payload: { objectId: obj.id } });
       };
 
-      // 1×1 对象且有 tile_frame → 用 Kenney tileset 瓦片渲染
-      if (tileFrame !== undefined && objW === 1 && objH === 1 && kenney && this.textures.exists(KENNEY_TILE_KEY) && tileFrame < kenney.total) {
-        const img = this.add.image(cx, cy, KENNEY_TILE_KEY, tileFrame);
-        img.setOrigin(0, 0);
-        img.setDisplaySize(DISPLAY_TILE, DISPLAY_TILE);
-        img.setData("objectId", obj.id);
-        img.setInteractive({ useHandCursor: true });
-        img.on("pointerdown", onClick);
-        this.objectLayer.add(img);
+      // Image/Rectangle 有自动命中区；Graphics 没有，需显式传 Rectangle
+      const makeImageInteractive = (go: Phaser.GameObjects.Image | Phaser.GameObjects.Rectangle) => {
+        go.setData("objectId", obj.id);
+        go.setInteractive({ useHandCursor: true });
+        go.on("pointerdown", onClick);
+      };
+      const makeGfxInteractive = (go: Phaser.GameObjects.Graphics) => {
+        go.setData("objectId", obj.id);
+        go.setInteractive(
+          new Phaser.Geom.Rectangle(px, py, w, h),
+          Phaser.Geom.Rectangle.Contains,
+        );
+        go.input!.cursor = "pointer";
+        go.on("pointerdown", onClick);
+      };
+
+      // ── tile_frame → 贴图渲染（支持 Kenney Tiny Town 和 Tiny Dungeon，支持任意尺寸缩放）──
+      if (tileFrame !== undefined) {
+        const isDungeon = tilesetKey === "kenney_tiny_dungeon";
+        const textureKey = isDungeon ? KENNEY_DUNGEON_KEY : KENNEY_TILE_KEY;
+        const meta = isDungeon ? dungeon : kenney;
+        if (meta && this.textures.exists(textureKey) && tileFrame < meta.total) {
+          const img = this.add.image(px, py, textureKey, tileFrame);
+          img.setOrigin(0, 0);
+          img.setDisplaySize(w, h);
+          makeImageInteractive(img);
+          this.objectLayer.add(img);
+          continue;
+        }
+      }
+
+      // ── 无 tile_frame → 根据标签绘制专用家具图形或彩色矩形 ──
+      const gfx = this.add.graphics();
+      makeGfxInteractive(gfx);
+      this.objectLayer.add(gfx);
+
+      if (tags.includes("bed")) {
+        this._drawBed(gfx, px, py, w, h, stateColor ?? 0x8899BB);
+      } else if (tags.includes("blackboard")) {
+        this._drawBlackboard(gfx, px, py, w, h);
+      } else if (tags.includes("desk") || tags.includes("table")) {
+        this._drawDesk(gfx, px, py, w, h, stateColor ?? 0xBB8855);
+      } else if (tags.includes("bookshelf")) {
+        this._drawBookshelf(gfx, px, py, w, h, stateColor ?? 0x663311);
+      } else if (tags.includes("plant")) {
+        this._drawPlant(gfx, px, py, w, h, stateColor ?? 0x4A7C59);
+      } else if (tags.includes("pet")) {
+        this._drawPetBed(gfx, px, py, w, h, stateColor ?? 0xE8C4A0);
       } else {
-        // 彩色矩形：优先用 state.color，次选根据是否阻挡的默认色
+        // 通用彩色矩形（计数台、货架、展台等）
         const defaultColor = obj.blocks_movement ? 0x3d3529 : 0xc9bfa4;
         const color = stateColor ?? defaultColor;
         const alpha = obj.blocks_movement ? 0.85 : 0.75;
-        const rect = this.add.rectangle(cx + w / 2, cy + h / 2, w - 4, h - 4, color, alpha);
-        rect.setStrokeStyle(1, 0x000000, 0.3);
-        rect.setData("objectId", obj.id);
-        rect.setInteractive({ useHandCursor: true });
-        rect.on("pointerdown", onClick);
-        this.objectLayer.add(rect);
+        gfx.fillStyle(color, alpha);
+        gfx.fillRect(px + 2, py + 2, w - 4, h - 4);
+        gfx.lineStyle(1, 0x000000, 0.3);
+        gfx.strokeRect(px + 2, py + 2, w - 4, h - 4);
+        // 若尺寸较大，加内部十字线表示大型家具
+        if (objW >= 2 || objH >= 2) {
+          gfx.lineStyle(1, 0x000000, 0.15);
+          gfx.lineBetween(px + w / 2, py + 2, px + w / 2, py + h - 2);
+          gfx.lineBetween(px + 2, py + h / 2, px + w - 2, py + h / 2);
+        }
       }
     }
+  }
+
+  /** 绘制床：床框 + 床单 + 枕头 */
+  private _drawBed(
+    gfx: Phaser.GameObjects.Graphics,
+    px: number, py: number, w: number, h: number,
+    color: number,
+  ): void {
+    // 床框（深木色）
+    gfx.fillStyle(0x7A5C3A, 1);
+    gfx.fillRect(px + 1, py + 1, w - 2, h - 2);
+    // 床单（主色调，略小）
+    gfx.fillStyle(color, 0.9);
+    gfx.fillRect(px + 3, py + 6, w - 6, h - 8);
+    // 水平床单折叠线
+    gfx.lineStyle(1, 0xFFFFFF, 0.3);
+    gfx.lineBetween(px + 4, py + h - 8, px + w - 4, py + h - 8);
+    // 枕头（白色，头部方向，顶部）
+    gfx.fillStyle(0xF0EEE8, 0.95);
+    const pillowW = Math.max(w - 12, 8);
+    const pillowH = Math.min(8, h / 3);
+    gfx.fillRoundedRect(px + (w - pillowW) / 2, py + 4, pillowW, pillowH, 2);
+    // 枕头轮廓
+    gfx.lineStyle(1, 0xCCCCCC, 0.5);
+    gfx.strokeRoundedRect(px + (w - pillowW) / 2, py + 4, pillowW, pillowH, 2);
+  }
+
+  /** 绘制黑板：黑板面 + 粉笔边框 */
+  private _drawBlackboard(
+    gfx: Phaser.GameObjects.Graphics,
+    px: number, py: number, w: number, h: number,
+  ): void {
+    // 木框
+    gfx.fillStyle(0x8B5E3C, 1);
+    gfx.fillRect(px, py, w, h);
+    // 黑板面
+    gfx.fillStyle(0x2D5A27, 1);
+    gfx.fillRect(px + 3, py + 3, w - 6, h - 6);
+    // 白色粉笔线条（模拟书写）
+    gfx.lineStyle(1, 0xFFFFFF, 0.5);
+    const lineY1 = py + h * 0.35;
+    const lineY2 = py + h * 0.65;
+    gfx.lineBetween(px + 6, lineY1, px + w - 8, lineY1);
+    gfx.lineBetween(px + 6, lineY2, px + w * 0.6, lineY2);
+  }
+
+  /** 绘制桌子/书桌：桌面 + 腿 */
+  private _drawDesk(
+    gfx: Phaser.GameObjects.Graphics,
+    px: number, py: number, w: number, h: number,
+    color: number,
+  ): void {
+    // 桌腿（深色）
+    gfx.fillStyle(0x7A5230, 1);
+    const legW = 3;
+    gfx.fillRect(px + 2, py + 2, legW, h - 4);
+    gfx.fillRect(px + w - legW - 2, py + 2, legW, h - 4);
+    // 桌面
+    gfx.fillStyle(color, 0.95);
+    gfx.fillRect(px + legW + 2, py + 2, w - (legW + 2) * 2, h - 4);
+    // 桌面高光
+    gfx.lineStyle(1, 0xFFFFFF, 0.25);
+    gfx.lineBetween(px + legW + 4, py + 4, px + w - legW - 4, py + 4);
+  }
+
+  /** 绘制书架：竖格 + 书本 */
+  private _drawBookshelf(
+    gfx: Phaser.GameObjects.Graphics,
+    px: number, py: number, w: number, h: number,
+    color: number,
+  ): void {
+    // 书架框
+    gfx.fillStyle(color, 1);
+    gfx.fillRect(px + 1, py + 1, w - 2, h - 2);
+    // 隔板
+    const shelfColor = Phaser.Display.Color.ValueToColor(color);
+    const darkerColor = Phaser.Display.Color.RGBToString(
+      Math.max(0, shelfColor.red - 40),
+      Math.max(0, shelfColor.green - 40),
+      Math.max(0, shelfColor.blue - 40),
+    );
+    gfx.lineStyle(1, parseInt(darkerColor.replace('#', ''), 16), 0.8);
+    const shelfCount = Math.max(1, Math.floor(h / DISPLAY_TILE));
+    for (let s = 1; s < shelfCount; s++) {
+      const sy = py + (h / shelfCount) * s;
+      gfx.lineBetween(px + 2, sy, px + w - 2, sy);
+    }
+    // 书本竖线（模拟书脊）
+    const BOOK_COLORS = [0xC0392B, 0x2980B9, 0x27AE60, 0xE67E22, 0x8E44AD];
+    const bookW = 4;
+    let bx = px + 3;
+    let bi = 0;
+    while (bx + bookW < px + w - 2) {
+      gfx.fillStyle(BOOK_COLORS[bi % BOOK_COLORS.length], 0.9);
+      gfx.fillRect(bx, py + 3, bookW - 1, h - 6);
+      bx += bookW;
+      bi++;
+    }
+  }
+
+  /** 绘制花架/花盆：绿色叶片 + 花盆 */
+  private _drawPlant(
+    gfx: Phaser.GameObjects.Graphics,
+    px: number, py: number, w: number, h: number,
+    color: number,
+  ): void {
+    // 花盆底部
+    gfx.fillStyle(0xC47A3C, 0.9);
+    const potH = Math.max(6, h / 3);
+    gfx.fillRect(px + w / 4, py + h - potH - 1, w / 2, potH);
+    // 绿叶（椭圆）
+    gfx.fillStyle(color, 0.9);
+    gfx.fillEllipse(px + w / 2, py + h / 2 - 2, w - 4, h - potH - 2);
+    // 花朵点缀
+    gfx.fillStyle(0xFFAA44, 0.8);
+    gfx.fillCircle(px + w / 2, py + h / 2 - 4, 3);
+  }
+
+  /** 绘制宠物窝：椭圆形软垫 + 边缘 */
+  private _drawPetBed(
+    gfx: Phaser.GameObjects.Graphics,
+    px: number, py: number, w: number, h: number,
+    color: number,
+  ): void {
+    // 边缘（深色圆环）
+    gfx.fillStyle(Phaser.Display.Color.ValueToColor(color).darken(30).color, 0.9);
+    gfx.fillEllipse(px + w / 2, py + h / 2, w - 2, h - 2);
+    // 内部软垫
+    gfx.fillStyle(color, 0.85);
+    gfx.fillEllipse(px + w / 2, py + h / 2 + 1, w - 8, h - 8);
   }
 
   private renderLocationLabels(dataset: SceneDataset): void {
@@ -651,11 +940,189 @@ export class TownScene extends Phaser.Scene {
   }
 
   // ---------------------------------------------------------------------
+  // 自然事件视觉效果（程序化绘制，无需外部精灵图）
+  // ---------------------------------------------------------------------
+
+  /**
+   * 在地图坐标 (x, y) 添加某类自然效果节点。
+   * 若 object_id 对应的效果已存在则先移除再添加（防重复）。
+   */
+  private addEffect(kind: string, p: NaturalEffectPayload): void {
+    const id = p.object_id ?? `${kind}_${p.x}_${p.y}`;
+    this.removeEffect(id);  // 清理旧节点
+
+    const cx = (p.x ?? 0) * DISPLAY_TILE + DISPLAY_TILE / 2;
+    const cy = (p.y ?? 0) * DISPLAY_TILE + DISPLAY_TILE / 2;
+    const r = DISPLAY_TILE / 2 - 2;
+    const effects = this.manifests?.tilesets.effects ?? {};
+
+    if (kind === "fire") {
+      const gfx = this.add.graphics();
+      const coreColor = effects.fire?.color_core ?? 0xFFCC00;
+      const outerColor = effects.fire?.color_outer ?? 0xFF4400;
+      const drawFire = (alpha: number) => {
+        gfx.clear();
+        gfx.fillStyle(outerColor, alpha * 0.8);
+        gfx.fillEllipse(cx, cy + 4, r * 2, r * 1.5);
+        gfx.fillStyle(coreColor, alpha);
+        gfx.fillEllipse(cx, cy, r * 1.2, r * 1.8);
+      };
+      drawFire(0.9);
+      this.effectLayer.add(gfx);
+      const tween = this.tweens.addCounter({
+        from: 70,
+        to: 100,
+        duration: 400,
+        yoyo: true,
+        repeat: -1,
+        onUpdate: (t) => drawFire((t?.getValue() ?? 90) / 100),
+      });
+      this.effectNodes.set(id, { kind, gfx, tween });
+
+    } else if (kind === "fishing") {
+      const gfx = this.add.graphics();
+      const color = effects.fishing_spot?.color ?? 0x3377FF;
+      const drawRipple = (scale: number) => {
+        gfx.clear();
+        gfx.lineStyle(2, color, 0.7 * (1 - scale));
+        gfx.strokeEllipse(cx, cy, r * 2 * scale, r * scale);
+      };
+      drawRipple(0.5);
+      this.effectLayer.add(gfx);
+      const tween = this.tweens.addCounter({
+        from: 30,
+        to: 100,
+        duration: 1200,
+        repeat: -1,
+        onUpdate: (t) => drawRipple((t?.getValue() ?? 50) / 100),
+      });
+      this.effectNodes.set(id, { kind, gfx, tween });
+
+    } else if (kind === "mushroom") {
+      const gfx = this.add.graphics();
+      const capColor = effects.mushroom?.color_cap ?? 0xFF2200;
+      const stemColor = effects.mushroom?.color_stem ?? 0xFFFFDD;
+      gfx.fillStyle(capColor, 0.85);
+      gfx.fillEllipse(cx, cy - 4, r * 1.6, r * 1.2);
+      gfx.fillStyle(stemColor, 0.85);
+      gfx.fillRect(cx - r * 0.3, cy - 2, r * 0.6, r * 0.8);
+      this.effectLayer.add(gfx);
+      this.effectNodes.set(id, { kind, gfx });
+
+    } else if (kind === "flower") {
+      const gfx = this.add.graphics();
+      const petalColors = [0xFF99BB, 0xFFBB33, 0xFF66AA, 0xFF3388];
+      const pc = petalColors[Math.floor(Math.random() * petalColors.length)];
+      gfx.fillStyle(pc, 0.8);
+      for (let i = 0; i < 5; i++) {
+        const angle = (i / 5) * Math.PI * 2;
+        gfx.fillEllipse(cx + Math.cos(angle) * r * 0.6, cy + Math.sin(angle) * r * 0.6, r * 0.7, r * 0.5);
+      }
+      gfx.fillStyle(0xFFFF00, 1.0);
+      gfx.fillCircle(cx, cy, r * 0.25);
+      this.effectLayer.add(gfx);
+      this.effectNodes.set(id, { kind, gfx });
+
+    } else if (kind === "firefly") {
+      const gfx = this.add.graphics();
+      const color = effects.firefly?.color ?? 0xFFFF88;
+      const [aMin, aMax] = effects.firefly?.alpha_range ?? [0.3, 0.9];
+      const dots = Array.from({ length: 5 }, (_, i) => ({
+        x: cx + (Math.random() - 0.5) * DISPLAY_TILE * 2,
+        y: cy + (Math.random() - 0.5) * DISPLAY_TILE * 2,
+        phase: i * 0.4,
+      }));
+      const drawFF = (t: number) => {
+        gfx.clear();
+        for (const d of dots) {
+          const a = aMin + (aMax - aMin) * (0.5 + 0.5 * Math.sin(t + d.phase));
+          gfx.fillStyle(color, a);
+          gfx.fillCircle(d.x, d.y, 2);
+        }
+      };
+      drawFF(0);
+      this.effectLayer.add(gfx);
+      const tween = this.tweens.addCounter({
+        from: 0,
+        to: Math.PI * 2,
+        duration: 2000,
+        repeat: -1,
+        onUpdate: (t) => drawFF(t?.getValue() ?? 0),
+      });
+      this.effectNodes.set(id, { kind, gfx, tween });
+
+    } else if (kind === "bird") {
+      const gfx = this.add.graphics();
+      const color = effects.bird?.color ?? 0x224422;
+      gfx.fillStyle(color, 0.8);
+      gfx.fillTriangle(cx - 6, cy, cx, cy - 4, cx + 6, cy);
+      this.effectLayer.add(gfx);
+      const tween = this.tweens.add({
+        targets: gfx,
+        y: `-=${DISPLAY_TILE * 0.3}`,
+        duration: 800,
+        yoyo: true,
+        repeat: -1,
+        ease: "Sine.easeInOut",
+      });
+      this.effectNodes.set(id, { kind, gfx, tween });
+
+    } else if (kind === "puddle") {
+      const color = effects.puddle?.color ?? 0x7FBFFF;
+      const rect = this.add.rectangle(cx, cy, DISPLAY_TILE - 4, DISPLAY_TILE / 3, color, 0.45);
+      this.effectLayer.add(rect);
+      this.effectNodes.set(id, { kind, gfx: rect });
+
+    } else if (kind === "fruit") {
+      const gfx = this.add.graphics();
+      const color = effects.fruit?.color ?? 0xFF8800;
+      gfx.fillStyle(color, 0.9);
+      gfx.fillCircle(cx, cy, r * 0.55);
+      gfx.fillStyle(0x33AA33, 0.8);
+      gfx.fillRect(cx - 1, cy - r * 0.55 - 4, 2, 5);
+      this.effectLayer.add(gfx);
+      this.effectNodes.set(id, { kind, gfx });
+    }
+  }
+
+  /** 移除并销毁某 objectId 对应的效果节点。 */
+  private removeEffect(objectId: string): void {
+    const node = this.effectNodes.get(objectId);
+    if (!node) return;
+    node.tween?.stop();
+    node.gfx.destroy();
+    this.effectNodes.delete(objectId);
+  }
+
+  /** 根据天气条件更新全屏叠加层颜色和透明度（保证最低可见度）。 */
+  private applyWeatherOverlay(condition: string, intensity: number): void {
+    // baseAlpha = 该天气最低可感知透明度；scale = 强度对透明度的放大系数
+    const cfg: Record<string, { color: number; baseAlpha: number; scale: number }> = {
+      sunny:  { color: 0xFFFFCC, baseAlpha: 0,    scale: 0    },
+      cloudy: { color: 0x8899AA, baseAlpha: 0.18, scale: 0.05 },
+      rainy:  { color: 0x2244AA, baseAlpha: 0.22, scale: 0.18 },
+      stormy: { color: 0x111133, baseAlpha: 0.40, scale: 0.20 },
+      foggy:  { color: 0xCCDDEE, baseAlpha: 0.30, scale: 0.20 },
+    };
+    const { color, baseAlpha, scale } = cfg[condition] ?? { color: 0, baseAlpha: 0, scale: 0 };
+    const alpha = baseAlpha + scale * Math.max(0, Math.min(1, intensity));
+    this.weatherOverlay.setFillStyle(color, alpha);
+  }
+
+  /** 雷声时短暂白闪。 */
+  private flashThunder(): void {
+    this.weatherOverlay.setFillStyle(0xFFFFFF, 0.5);
+    this.time.delayedCall(80, () => {
+      this.weatherOverlay.setFillStyle(0x111133, 0.28);
+    });
+  }
+
+  // ---------------------------------------------------------------------
   // 输入
   // ---------------------------------------------------------------------
 
   private onPointerDown(pointer: Phaser.Input.Pointer): void {
-    if (!this.currentSceneId) return;
+    if (this._inputBlocked || !this.currentSceneId) return;
     const worldX = this.cameras.main.worldView.x + pointer.x;
     const worldY = this.cameras.main.worldView.y + pointer.y;
     const tx = Math.floor(worldX / DISPLAY_TILE);
@@ -668,6 +1135,7 @@ export class TownScene extends Phaser.Scene {
   }
 
   private onKeyDown(event: KeyboardEvent): void {
+    if (this._inputBlocked) return;
     const now = Date.now();
     if (now - this.lastMoveAt < 120) return;
     const map: Record<string, "up" | "down" | "left" | "right"> = {

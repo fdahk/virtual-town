@@ -77,7 +77,7 @@ class WorldObject(BaseModel):
     id: str
     scene_id: str
     name: str
-    object_type: Literal["furniture", "facility", "barrier", "plant", "decoration", "item"]
+    object_type: Literal["furniture", "facility", "barrier", "plant", "decoration", "item", "nature_spot"]
     position: TilePosition
     size: dict[str, int]
     blocks_movement: bool

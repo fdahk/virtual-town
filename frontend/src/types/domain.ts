@@ -85,7 +85,8 @@ export interface WorldObject {
     | "barrier"
     | "plant"
     | "decoration"
-    | "item";
+    | "item"
+    | "nature_spot";
   position: TilePosition;
   size: { width: number; height: number };
   blocks_movement: boolean;

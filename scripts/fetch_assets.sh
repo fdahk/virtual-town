@@ -49,6 +49,43 @@ cp "$CACHE_DIR/tiny_town/Tilemap/tilemap_packed.png" "$ASSETS_DIR/tilesets/kenne
 cp "$CACHE_DIR/tiny_town/License.txt" "$ASSETS_DIR/tilesets/kenney_tiny_town/LICENSE.txt" 2>/dev/null || true
 cp "$CACHE_DIR/tiny_town/Tilesheet.txt" "$ASSETS_DIR/tilesets/kenney_tiny_town/README.txt" 2>/dev/null || true
 
+echo "[fetch] Kenney Tiny Dungeon (CC0) – furniture & interior tiles"
+mkdir -p "$ASSETS_DIR/tilesets/kenney_tiny_dungeon"
+DZIP="$CACHE_DIR/kenney_tinydungeon.zip"
+DDIR="$CACHE_DIR/tiny_dungeon"
+if ! skip_if_present "$DZIP"; then
+  curl -sLfo "$DZIP" "https://opengameart.org/sites/default/files/kenney_tinydungeon.zip"
+fi
+if ! skip_if_present "$ASSETS_DIR/tilesets/kenney_tiny_dungeon/tilemap_packed.png"; then
+  unzip -oq "$DZIP" -d "$DDIR"
+  # 将单个 tile_*.png 合成为 12×11 sprite sheet（与 Tiny Town 格式一致）
+  TILES_DIR="$DDIR/Tiles"
+  OUT_SHEET="$ASSETS_DIR/tilesets/kenney_tiny_dungeon/tilemap_packed.png"
+  if [ -x "$ROOT_DIR/backend/.venv/bin/python" ]; then
+    PY_BIN="$ROOT_DIR/backend/.venv/bin/python"
+  else
+    PY_BIN="python3"
+  fi
+  "$PY_BIN" - "$TILES_DIR" "$OUT_SHEET" << 'PYEOF'
+import sys, glob
+from PIL import Image
+TILES_DIR, OUT = sys.argv[1], sys.argv[2]
+tiles = sorted(glob.glob(f"{TILES_DIR}/tile_*.png"))
+if not tiles:
+    print("[warn] Tiny Dungeon tiles not found, skipping"); exit(0)
+COLS, TW, TH = 12, 16, 16
+ROWS = (len(tiles) + COLS - 1) // COLS
+sheet = Image.new("RGBA", (TW * COLS, TH * ROWS), (0, 0, 0, 0))
+for i, path in enumerate(tiles):
+    t = Image.open(path).convert("RGBA")
+    if t.size != (TW, TH): t = t.resize((TW, TH), Image.NEAREST)
+    sheet.paste(t, ((i % COLS) * TW, (i // COLS) * TH))
+sheet.save(OUT)
+print(f"[fetch] Tiny Dungeon: composed {len(tiles)} tiles into sheet")
+PYEOF
+  cp "$DDIR/License.txt" "$ASSETS_DIR/tilesets/kenney_tiny_dungeon/LICENSE.txt" 2>/dev/null || true
+fi
+
 echo "[fetch] LPC Cats and Dogs (CC-BY 3.0)"
 CAT="$CACHE_DIR/lpc_cats.png"
 DOG="$CACHE_DIR/lpc_dogs.png"
@@ -123,6 +160,25 @@ fi
 "$PY" "$ROOT_DIR/scripts/compose_lpc.py" \
   --in "$LPC_CACHE" \
   --out "$ASSETS_DIR/sprites/humans"
+
+echo "[fetch] natural-event effect assets (procedural SVG fallbacks – no external dependency)"
+EFFECTS_DIR="$ASSETS_DIR/effects"
+mkdir -p "$EFFECTS_DIR"
+
+# 生成程序化 SVG 粒子帧，无外部依赖，授权为 CC0（自制）
+# 前端直接用 Phaser Graphics API 绘制动效；此处生成 1×1 透明 PNG 作为占位符，
+# 真实美术资源可在此替换同名文件而无需改代码。
+generate_placeholder_png() {
+  local target="$1"
+  if skip_if_present "$target"; then return 0; fi
+  # 生成 1x1 透明 PNG（base64 解码）
+  printf '\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x01\x00\x00\x00\x01\x08\x06\x00\x00\x00\x1f\x15\xc4\x89\x00\x00\x00\nIDATx\x9cc\x00\x01\x00\x00\x05\x00\x01\r\n-\xb4\x00\x00\x00\x00IEND\xaeB`\x82' > "$target"
+}
+
+generate_placeholder_png "$EFFECTS_DIR/fire_placeholder.png"
+generate_placeholder_png "$EFFECTS_DIR/raindrop_placeholder.png"
+generate_placeholder_png "$EFFECTS_DIR/firefly_placeholder.png"
+generate_placeholder_png "$EFFECTS_DIR/splash_placeholder.png"
 
 echo "[fetch] done."
 echo "Next step: generate portraits with GenerateImage, then write manifest."

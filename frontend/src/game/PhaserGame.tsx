@@ -5,13 +5,14 @@ import { loadManifests, type LoadedManifests } from "./assets/manifest";
 
 interface Props {
   onReady(scene: TownScene): void;
+  onProgress?(value: number): void;
 }
 
 // 使用一个 sentinel 对象代替 null 区分"尚未尝试"与"已尝试但失败"
 const MANIFEST_MISSING = Symbol("manifest-missing");
 type ManifestResult = LoadedManifests | typeof MANIFEST_MISSING;
 
-export function PhaserGame({ onReady }: Props) {
+export function PhaserGame({ onReady, onProgress }: Props) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const gameRef = useRef<Phaser.Game | null>(null);
   const [manifests, setManifests] = useState<ManifestResult | null>(null);
@@ -48,6 +49,7 @@ export function PhaserGame({ onReady }: Props) {
       // 必须在 Phaser 启动场景生命周期之前把 manifests 挂上去，
       // 让 preload() 能直接读取、一次性注册所有 spritesheet。
       scene.setManifests(manifests === MANIFEST_MISSING ? null : manifests);
+      if (onProgress) scene.setProgressCallback(onProgress);
 
       const game = new Phaser.Game({
         type: Phaser.AUTO,

@@ -24,7 +24,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.logging import get_logger
-from app.db.models import Agent, AgentState, Location
+from app.db.models import Agent, AgentState, Location, WorldObject
 from app.domain.planning import get_planning_service
 from app.llm.client import get_llm_client
 from app.llm.tools.base import ToolCall, ToolContext, ToolResult
@@ -271,7 +271,70 @@ async def _perceive(
     if unreachable_set:
         text_lines.append(f"- 本轮不可到达（已屏蔽）：{', '.join(sorted(unreachable_set)[:8])}")
 
+    # 自然事件感知：从引擎内存读取附近特殊状态对象
+    await _append_natural_context(session, state, text_lines)
+
     return {"text": "\n".join(text_lines), "nearby": nearby_entities}
+
+
+async def _append_natural_context(
+    session: AsyncSession, state: AgentState, text_lines: list[str]
+) -> None:
+    """
+    将附近的自然事件状态（火焰、告示牌、钓鱼点等）拼入感知文本，
+    供 LLM 理解并做出情境化决策。只读，不修改任何状态。
+    """
+    try:
+        from app.services.simulation_runtime import get_simulation_runtime
+
+        engine = get_simulation_runtime().engine
+        if engine is None:
+            return
+        weather = engine._weather  # type: ignore[attr-defined]
+        objects = engine._objects  # type: ignore[attr-defined]
+    except Exception:
+        return
+
+    # 天气描述
+    weather_desc = {
+        "sunny": "晴天", "cloudy": "多云", "rainy": "下雨",
+        "stormy": "暴风雨", "foggy": "有雾",
+    }.get(weather.condition, weather.condition)
+    text_lines.append(f"- 当前天气：{weather_desc}，气温约 {weather.temperature:.0f}°C")
+
+    # 附近特殊状态对象
+    fire_names: list[str] = []
+    sign_texts: list[str] = []
+    fishing_names: list[str] = []
+    ripe_names: list[str] = []
+    firefly_names: list[str] = []
+
+    for obj in objects.values():
+        if obj.scene_id != state.scene_id:
+            continue
+        dist = abs(obj.x - state.x) + abs(obj.y - state.y)
+        if obj.state.get("on_fire") and dist <= 8:
+            fire_names.append(f"{obj.name}({dist}格外)")
+        notice = obj.state.get("notice_text")
+        if notice and dist <= 5:
+            sign_texts.append(f"「{notice[:40]}」")
+        if obj.state.get("fishing_active") and dist <= 4:
+            fishing_names.append(obj.name)
+        if (obj.state.get("fruit_ripe") or obj.state.get("mushroom_present")) and dist <= 3:
+            ripe_names.append(obj.name)
+        if obj.state.get("firefly_active") and dist <= 6:
+            firefly_names.append(obj.name)
+
+    if fire_names:
+        text_lines.append(f"- ⚠ 附近正在燃烧：{', '.join(fire_names[:3])}")
+    if sign_texts:
+        text_lines.append(f"- 附近告示牌：{'; '.join(sign_texts[:2])}")
+    if fishing_names:
+        text_lines.append(f"- 附近有鱼儿活跃的钓鱼点：{', '.join(fishing_names[:2])}")
+    if ripe_names:
+        text_lines.append(f"- 附近有可采摘的果实/蘑菇：{', '.join(ripe_names[:3])}")
+    if firefly_names:
+        text_lines.append(f"- 夜色中可见萤火虫飞舞于：{', '.join(firefly_names[:2])}")
 
 
 async def _retrieve(

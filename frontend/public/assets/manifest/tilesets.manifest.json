@@ -13,6 +13,38 @@
       "license": "CC0 1.0 Universal",
       "source": "https://opengameart.org/content/tiny-town",
       "author": "Kenney"
+    },
+    "kenney_tiny_dungeon": {
+      "id": "kenney_tiny_dungeon",
+      "url": "/assets/tilesets/kenney_tiny_dungeon/tilemap_packed.png",
+      "tile_width": 16,
+      "tile_height": 16,
+      "columns": 12,
+      "rows": 11,
+      "total": 132,
+      "display_scale": 2,
+      "license": "CC0 1.0 Universal",
+      "source": "https://opengameart.org/content/tiny-dungeon",
+      "author": "Kenney",
+      "frame_notes": {
+        "51": "bookcase/cabinet (two drawers)",
+        "60": "wooden table",
+        "61": "chair (rounded back)",
+        "63": "dark bookcase",
+        "64": "wooden crate",
+        "65": "armor stand",
+        "66": "shelf unit",
+        "67": "ladder",
+        "68": "wooden planks",
+        "77": "chest (brown)",
+        "78": "chest (open)",
+        "79": "chest (locked)",
+        "80": "red/orange chest",
+        "82": "bed frame with pillow",
+        "83": "cage bottom",
+        "55": "barrel/urn",
+        "56": "metal barrel"
+      }
     }
   },
   "terrain_map": {
@@ -49,5 +81,52 @@
     "cauldron": 92,
     "fence_h": 81,
     "target": 95
+  },
+  "effects": {
+    "fire": {
+      "note": "前端用 Phaser Graphics API 程序化绘制火焰动效，无需外部精灵图",
+      "color_core": 16766720,
+      "color_outer": 16711680,
+      "color_smoke": 4473924,
+      "license": "CC0"
+    },
+    "rain": {
+      "note": "程序化绘制雨滴线条",
+      "color": 7471103,
+      "alpha": 0.4,
+      "license": "CC0"
+    },
+    "firefly": {
+      "note": "程序化绘制萤火虫光点",
+      "color": 16777113,
+      "alpha_range": [0.3, 0.9],
+      "license": "CC0"
+    },
+    "puddle": {
+      "note": "程序化绘制水坑涟漪",
+      "color": 4290822399,
+      "license": "CC0"
+    },
+    "mushroom": {
+      "note": "程序化绘制蘑菇图标覆盖层",
+      "color_cap": 16711680,
+      "color_stem": 16777215,
+      "license": "CC0"
+    },
+    "fishing_spot": {
+      "note": "程序化绘制水面涟漪动效",
+      "color": 3381759,
+      "license": "CC0"
+    },
+    "fruit": {
+      "note": "程序化绘制熟果图标",
+      "color": 16744448,
+      "license": "CC0"
+    },
+    "bird": {
+      "note": "程序化绘制小鸟图标",
+      "color": 2236962,
+      "license": "CC0"
+    }
   }
 }

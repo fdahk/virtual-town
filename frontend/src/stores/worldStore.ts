@@ -28,6 +28,7 @@ interface WorldStore {
 
   // UI
   selectedAgentId: string | null;
+  selectedObjectId: string | null;
   playerSceneId: string | null;
   pendingDialogue: {
     targetId: string;
@@ -44,6 +45,12 @@ interface WorldStore {
   setSceneLocations(sceneId: string, locations: Location[]): void;
   setScenePortals(sceneId: string, portals: Portal[]): void;
   setSceneObjects(sceneId: string, objects: WorldObject[]): void;
+  /** 局部更新场景中某个物品的字段（state/位置/可交互列表等） */
+  patchSceneObject(sceneId: string, objectId: string, patch: Partial<WorldObject>): void;
+  /** 向场景中添加一个新物品（运行时由后端 spawn 事件触发） */
+  addSceneObject(sceneId: string, object: WorldObject): void;
+  /** 从场景中移除一个物品（运行时由后端 despawn 事件触发） */
+  removeSceneObject(sceneId: string, objectId: string): void;
   setSimulation(sim: Simulation | null): void;
   patchSimulationClock(worldTime: string, step: number): void;
   setRuntimeStates(states: AgentRuntimeState[]): void;
@@ -51,6 +58,7 @@ interface WorldStore {
   setEvents(events: WorldEvent[]): void;
   pushEvents(events: WorldEvent[]): void;
   selectAgent(id: string | null): void;
+  selectObject(id: string | null): void;
   setPendingDialogue(data: WorldStore["pendingDialogue"]): void;
   setTrackingAgent(id: string | null): void;
 }
@@ -67,6 +75,7 @@ export const useWorldStore = create<WorldStore>((set) => ({
   runtimeByAgent: {},
   events: [],
   selectedAgentId: null,
+  selectedObjectId: null,
   playerSceneId: null,
   pendingDialogue: null,
   trackingAgentId: null,
@@ -91,6 +100,38 @@ export const useWorldStore = create<WorldStore>((set) => ({
     set((s) => ({ portalsByScene: { ...s.portalsByScene, [sceneId]: portals } })),
   setSceneObjects: (sceneId, objects) =>
     set((s) => ({ objectsByScene: { ...s.objectsByScene, [sceneId]: objects } })),
+
+  patchSceneObject: (sceneId, objectId, patch) =>
+    set((s) => {
+      const list = s.objectsByScene[sceneId];
+      if (!list) return {};
+      const next = list.map((o) => {
+        if (o.id !== objectId) return o;
+        // state 是嵌套对象，需要单独 merge
+        const merged: WorldObject = { ...o, ...patch };
+        if (patch.state) merged.state = { ...o.state, ...patch.state };
+        return merged;
+      });
+      return { objectsByScene: { ...s.objectsByScene, [sceneId]: next } };
+    }),
+
+  addSceneObject: (sceneId, object) =>
+    set((s) => {
+      const list = s.objectsByScene[sceneId] ?? [];
+      // 同 id 去重
+      if (list.some((o) => o.id === object.id)) return {};
+      return { objectsByScene: { ...s.objectsByScene, [sceneId]: [...list, object] } };
+    }),
+
+  removeSceneObject: (sceneId, objectId) =>
+    set((s) => {
+      const list = s.objectsByScene[sceneId];
+      if (!list) return {};
+      const next = list.filter((o) => o.id !== objectId);
+      // 同时清理选中态
+      const cleared = s.selectedObjectId === objectId ? { selectedObjectId: null } : {};
+      return { objectsByScene: { ...s.objectsByScene, [sceneId]: next }, ...cleared };
+    }),
 
   setSimulation: (sim) => set(() => ({ simulation: sim })),
   patchSimulationClock: (worldTime, step) =>
@@ -126,7 +167,8 @@ export const useWorldStore = create<WorldStore>((set) => ({
     set((s) => ({
       events: [...events, ...s.events].slice(0, 200),
     })),
-  selectAgent: (id) => set(() => ({ selectedAgentId: id })),
+  selectAgent: (id) => set(() => ({ selectedAgentId: id, selectedObjectId: null })),
+  selectObject: (id) => set(() => ({ selectedObjectId: id, selectedAgentId: null })),
   setPendingDialogue: (data) => set(() => ({ pendingDialogue: data })),
   setTrackingAgent: (id) => set(() => ({ trackingAgentId: id })),
 }));

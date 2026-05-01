@@ -44,10 +44,17 @@ from app.db.models import (
     Simulation,
     Task,
     WorldEvent,
+    WorldObject,
 )
 from app.services.event_router import WORLD_EVENT_TOPIC
+from app.domain.simulation.natural_events import (
+    NaturalEventContext,
+    WeatherState,
+    tick_all as _tick_natural_all,
+)
 from app.domain.simulation.rule_agent import (
     AgentDecision,
+    NaturalWorldContext,
     decide_animal_action,
     decide_human_action,
 )
@@ -97,6 +104,27 @@ class EngineAgent:
     is_player: bool = False
 
 
+@dataclass
+class EngineObject:
+    """引擎内存中的 WorldObject 运行态副本，用于自然事件系统读写对象状态。"""
+
+    id: str
+    scene_id: str
+    name: str
+    object_type: str
+    x: int
+    y: int
+    width: int = 1
+    height: int = 1
+    blocks_movement: bool = False
+    available_interactions: list[str] = field(default_factory=list)
+    state: dict[str, Any] = field(default_factory=dict)
+    tags: list[str] = field(default_factory=list)
+    dirty: bool = False  # state 被修改后置 True，引擎在 _persist_tick 写回 DB
+    pending_create: bool = False  # 由 spawn_object 创建，尚未写入 DB
+    pending_delete: bool = False  # 由 despawn_object 标记，下次 persist 时从 DB 删除
+
+
 class SimulationEngine:
     """
     并发模型：
@@ -128,6 +156,9 @@ class SimulationEngine:
         self._last_summary_day: dict[str, str] = {}
         # CHATTING 进入的真实时间戳（用于超时恢复，独立于游戏时间）
         self._chatting_since_real: dict[str, float] = {}
+        # 自然事件系统：WorldObject 内存缓存 + 全局天气
+        self._objects: dict[str, EngineObject] = {}
+        self._weather: WeatherState = WeatherState()
 
     # ------------------------------------------------------------------
     # 生命周期
@@ -140,6 +171,9 @@ class SimulationEngine:
             await self._load_state(session)
         self._running = True
         self._stopping = False
+        # 引擎启动后立刻向所有连接的客户端广播一次当前天气，
+        # 解决"页面刷新后天气叠加层失去状态"问题
+        self.broadcast_weather_state()
         self._task = asyncio.create_task(self._main_loop(), name="sim-engine")
         logger.info("simulation engine started", extra={"simulation_id": self._sim_id()})
 
@@ -240,6 +274,27 @@ class SimulationEngine:
         for p in portals:
             self._portals_by_scene.setdefault(p.from_scene_id, []).append(p)
 
+        # 加载所有 WorldObject 到内存缓存，供自然事件系统读写
+        objects = (await session.execute(select(WorldObject))).scalars().all()
+        self._objects = {
+            o.id: EngineObject(
+                id=o.id,
+                scene_id=o.scene_id,
+                name=o.name,
+                object_type=o.object_type,
+                x=int(o.position.get("x", 0)),
+                y=int(o.position.get("y", 0)),
+                width=int(o.size.get("width", 1)),
+                height=int(o.size.get("height", 1)),
+                blocks_movement=o.blocks_movement,
+                available_interactions=list(o.available_interactions or []),
+                state=dict(o.state or {}),
+                tags=list(o.tags or []),
+                dirty=False,
+            )
+            for o in objects
+        }
+
     # ------------------------------------------------------------------
     # 主循环
     # ------------------------------------------------------------------
@@ -321,6 +376,9 @@ class SimulationEngine:
         # 反思/日结通过 daily_reflection 任务异步执行，不阻塞世界 tick
         await self._enqueue_reflect_batch(now_dt)
 
+        # 4.5 自然事件 tick（修改 EngineObject.state，生成 WorldEvent）
+        self._tick_natural_events(now_dt)
+
         # 5. 汇总 updates
         for agent in self._agents.values():
             if agent.dirty:
@@ -334,6 +392,8 @@ class SimulationEngine:
 
         for agent in self._agents.values():
             agent.dirty = False
+        for obj in self._objects.values():
+            obj.dirty = False
 
     def _to_runtime_state(self, a: EngineAgent) -> AgentRuntimeState:
         return AgentRuntimeState(
@@ -475,6 +535,7 @@ class SimulationEngine:
                         nearby_player=nearby,
                     )
                 else:
+                    natural_ctx = self._build_natural_ctx_for_agent(agent)
                     decision = decide_human_action(
                         agent_row=meta,
                         state_row=fake_state,
@@ -482,6 +543,7 @@ class SimulationEngine:
                         locations=self._locations,
                         grids=grids,
                         portals_by_scene=self._portals_by_scene,
+                        natural_ctx=natural_ctx,
                     )
             except Exception:
                 logger.exception("decide failed for %s", agent.id)
@@ -519,6 +581,71 @@ class SimulationEngine:
                 payload={"action": decision.action_type, "goal": decision.description},
                 created_at=utcnow(),
             )
+        )
+
+    # ------------------------------------------------------------------
+    # 自然事件系统
+    # ------------------------------------------------------------------
+
+    def _tick_natural_events(self, now_dt: datetime) -> None:
+        """
+        运行所有自然事件处理器（不阻塞 asyncio）。
+        主场景 = 第一个 outdoor 场景（也是自然事件发生的主要舞台）。
+        """
+        outdoor_scene_id = self._primary_outdoor_scene_id()
+        if outdoor_scene_id is None:
+            return
+        ctx = NaturalEventContext(
+            objects=self._objects,
+            agents=self._agents,
+            scene_id=outdoor_scene_id,
+            world_time=now_dt,
+            sim_id=self._sim_id(),
+            rng=self._rng,
+            weather=self._weather,
+        )
+        new_events = _tick_natural_all(ctx)
+        self._pending_events.extend(new_events)
+
+    def _primary_outdoor_scene_id(self) -> str | None:
+        """返回第一个存在 Agent 的室外场景 ID，用于自然事件的主场景。"""
+        for agent in self._agents.values():
+            if not agent.is_player:
+                return agent.scene_id
+        return None
+
+    def _build_natural_ctx_for_agent(self, agent: EngineAgent) -> "NaturalWorldContext":
+        """构建当前 Agent 周围的自然环境上下文，供规则决策使用。"""
+        nearby_fires: list[tuple[int, int, str]] = []
+        nearby_fishing: list[tuple[int, int, str]] = []
+        nearby_benches: list[tuple[int, int, str]] = []
+        nearby_signs: list[tuple[int, int, str, str]] = []
+        nearby_ripe: list[tuple[int, int, str]] = []
+
+        for obj in self._objects.values():
+            if obj.scene_id != agent.scene_id:
+                continue
+            dist = abs(obj.x - agent.x) + abs(obj.y - agent.y)
+            if obj.state.get("on_fire") and dist <= 8:
+                nearby_fires.append((obj.x, obj.y, obj.name))
+            if obj.state.get("fishing_active") and "fishing_spot" in (obj.tags or []) and dist <= 4:
+                nearby_fishing.append((obj.x, obj.y, obj.name))
+            if "bench" in (obj.tags or []) and not obj.state.get("occupied") and dist <= 2:
+                nearby_benches.append((obj.x, obj.y, obj.name))
+            notice = obj.state.get("notice_text")
+            if notice and dist <= 5:
+                nearby_signs.append((obj.x, obj.y, obj.id, notice))
+            if (obj.state.get("fruit_ripe") or obj.state.get("mushroom_present")) and dist <= 2:
+                nearby_ripe.append((obj.x, obj.y, obj.name))
+
+        return NaturalWorldContext(
+            weather=self._weather.condition,
+            storm_active=self._weather.is_dangerous(),
+            nearby_fires=nearby_fires,
+            nearby_fishing_spots=nearby_fishing,
+            nearby_benches=nearby_benches,
+            nearby_signs=nearby_signs,
+            nearby_ripe_objects=nearby_ripe,
         )
 
     async def _on_agent_arrived(self, agent: EngineAgent) -> None:
@@ -696,7 +823,38 @@ class SimulationEngine:
                     )
             for evt in events:
                 session.add(evt)
+            # 写回被自然事件系统/玩家交互标记为 dirty 的 WorldObject
+            despawned_ids: list[str] = []
+            for eng_obj in list(self._objects.values()):
+                if not eng_obj.dirty:
+                    continue
+                if eng_obj.pending_delete:
+                    db_obj = await session.get(WorldObject, eng_obj.id)
+                    if db_obj is not None:
+                        await session.delete(db_obj)
+                    despawned_ids.append(eng_obj.id)
+                elif eng_obj.pending_create:
+                    session.add(WorldObject(
+                        id=eng_obj.id,
+                        scene_id=eng_obj.scene_id,
+                        name=eng_obj.name,
+                        object_type=eng_obj.object_type,
+                        position={"x": eng_obj.x, "y": eng_obj.y},
+                        size={"width": eng_obj.width, "height": eng_obj.height},
+                        blocks_movement=eng_obj.blocks_movement,
+                        available_interactions=list(eng_obj.available_interactions),
+                        state=dict(eng_obj.state),
+                        tags=list(eng_obj.tags),
+                    ))
+                    eng_obj.pending_create = False
+                else:
+                    db_obj = await session.get(WorldObject, eng_obj.id)
+                    if db_obj is not None:
+                        db_obj.state = dict(eng_obj.state)
             await session.commit()
+            # 持久化完成后，从内存缓存中真正移除已 despawn 的对象
+            for oid in despawned_ids:
+                self._objects.pop(oid, None)
         # 同步内存 ORM 对象，保证 snapshot() / get_simulation() 返回最新值
         if self._simulation is not None:
             self._simulation.current_step = self._step
@@ -814,6 +972,176 @@ class SimulationEngine:
 
     def get_agent(self, agent_id: str) -> EngineAgent | None:
         return self._agents.get(agent_id)
+
+    # ------------------------------------------------------------------
+    # 物品生命周期 API（被 player_service / 自然事件 / 任务系统调用）
+    # ------------------------------------------------------------------
+
+    def get_object(self, object_id: str) -> EngineObject | None:
+        """读取内存中的物品；若返回的实例被修改了 state，调用方必须设置 dirty=True。"""
+        return self._objects.get(object_id)
+
+    def apply_object_state_change(
+        self,
+        object_id: str,
+        patch: dict[str, Any],
+        *,
+        actor: str | None = None,
+        description: str = "",
+        importance: int = 1,
+        event_type: str = "world.object_state_changed",
+    ) -> EngineObject | None:
+        """
+        合并 patch 到对象 state，标记 dirty 等待持久化，
+        并发布一条 WorldEvent 让前端实时刷新该物品的视觉表现。
+
+        约定：要"删除某 state key"，把对应 value 设为 None。
+        """
+        obj = self._objects.get(object_id)
+        if obj is None:
+            return None
+        for key, val in patch.items():
+            if val is None:
+                obj.state.pop(key, None)
+            else:
+                obj.state[key] = val
+        obj.dirty = True
+
+        evt = WorldEvent(
+            simulation_id=self._sim_id(),
+            event_type=event_type,
+            source="world",
+            actor_entity_id=actor,
+            target_entity_id=obj.id,
+            scene_id=obj.scene_id,
+            description=description or f"{obj.name} 状态发生变化",
+            importance=importance,
+            payload={
+                "object_id": obj.id,
+                "name": obj.name,
+                "x": obj.x,
+                "y": obj.y,
+                "patch": {k: v for k, v in patch.items()},
+                "state": dict(obj.state),
+            },
+            created_at=self._world_time,
+        )
+        self._pending_events.append(evt)
+        return obj
+
+    def spawn_object(
+        self,
+        *,
+        scene_id: str,
+        name: str,
+        object_type: str,
+        x: int,
+        y: int,
+        width: int = 1,
+        height: int = 1,
+        blocks_movement: bool = False,
+        available_interactions: list[str] | None = None,
+        state: dict[str, Any] | None = None,
+        tags: list[str] | None = None,
+        actor: str | None = None,
+        description: str = "",
+        importance: int = 2,
+    ) -> EngineObject:
+        """运行时新增一个 WorldObject：写入内存缓存 + 标记待持久化 + 广播 spawn 事件。"""
+        from uuid import uuid4
+
+        obj_id = f"obj_{uuid4().hex[:8]}"
+        obj = EngineObject(
+            id=obj_id,
+            scene_id=scene_id,
+            name=name,
+            object_type=object_type,
+            x=x,
+            y=y,
+            width=width,
+            height=height,
+            blocks_movement=blocks_movement,
+            available_interactions=list(available_interactions or []),
+            state=dict(state or {}),
+            tags=list(tags or []),
+            dirty=True,
+            pending_create=True,
+        )
+        self._objects[obj_id] = obj
+
+        evt = WorldEvent(
+            simulation_id=self._sim_id(),
+            event_type="world.object_spawned",
+            source="world",
+            actor_entity_id=actor,
+            target_entity_id=obj_id,
+            scene_id=scene_id,
+            description=description or f"世界中新出现了 {name}",
+            importance=importance,
+            payload={
+                "object_id": obj_id,
+                "scene_id": scene_id,
+                "name": name,
+                "object_type": object_type,
+                "position": {"x": x, "y": y},
+                "size": {"width": width, "height": height},
+                "blocks_movement": blocks_movement,
+                "available_interactions": list(available_interactions or []),
+                "state": dict(state or {}),
+                "tags": list(tags or []),
+            },
+            created_at=self._world_time,
+        )
+        self._pending_events.append(evt)
+        return obj
+
+    def despawn_object(
+        self,
+        object_id: str,
+        *,
+        actor: str | None = None,
+        description: str = "",
+        importance: int = 2,
+    ) -> EngineObject | None:
+        """运行时移除一个 WorldObject：标记 pending_delete + 广播 despawn 事件。"""
+        obj = self._objects.get(object_id)
+        if obj is None:
+            return None
+        obj.pending_delete = True
+        obj.dirty = True
+
+        evt = WorldEvent(
+            simulation_id=self._sim_id(),
+            event_type="world.object_despawned",
+            source="world",
+            actor_entity_id=actor,
+            target_entity_id=object_id,
+            scene_id=obj.scene_id,
+            description=description or f"{obj.name} 从世界中消失",
+            importance=importance,
+            payload={"object_id": object_id, "scene_id": obj.scene_id, "name": obj.name},
+            created_at=self._world_time,
+        )
+        self._pending_events.append(evt)
+        return obj
+
+    def broadcast_weather_state(self) -> None:
+        """主动把当前天气作为一条 weather.condition_changed 事件广播一次（用于客户端首次连接同步）。"""
+        evt = WorldEvent(
+            simulation_id=self._sim_id(),
+            event_type="weather.condition_changed",
+            source="world",
+            scene_id=None,
+            description=f"当前天气：{self._weather.condition}，强度 {self._weather.intensity:.1f}",
+            importance=1,
+            payload={
+                "prev": self._weather.condition,
+                "condition": self._weather.condition,
+                "intensity": self._weather.intensity,
+            },
+            created_at=self._world_time,
+        )
+        self._pending_events.append(evt)
 
     def start_chatting(self, agent_id: str) -> None:
         """令指定 Agent 进入 CHATTING 状态并记录开始时间，用于 player talk() 调用时冻结 NPC。"""

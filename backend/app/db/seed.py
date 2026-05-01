@@ -608,7 +608,8 @@ def seed(session: Session, *, force: bool = True) -> None:
     # ------------------ World objects ------------------
     objects: list[WorldObject] = []
     # 护栏（无桥处的河岸）— tile_frame=81 横向木栅栏
-    for x in list(range(0, 12)) + list(range(17, OUTDOOR_W)):
+    # 跳过桥区(x=12-16)、竖向道路(x=19,20)，避免与道路/桥重叠
+    for x in list(range(0, 12)) + list(range(17, 19)) + list(range(21, OUTDOOR_W)):
         objects.append(
             WorldObject(
                 id=_uid("obj_fence"),
@@ -625,6 +626,7 @@ def seed(session: Session, *, force: bool = True) -> None:
         )
 
     # 河边长椅（loc_river_bench 区域：x=22~24, y=7）
+    # tile_frame=61 Kenney Tiny Dungeon 椅子图块
     for bx in (22, 24):
         objects.append(
             WorldObject(
@@ -635,8 +637,8 @@ def seed(session: Session, *, force: bool = True) -> None:
                 position={"x": bx, "y": 7},
                 size={"width": 1, "height": 1},
                 blocks_movement=False,
-                available_interactions=["sit", "inspect"],
-                state={"color": 0xB87333},          # 铜棕色模拟木椅
+                available_interactions=["sit", "rest", "inspect"],
+                state={"tile_frame": 61, "tileset": "kenney_tiny_dungeon"},
                 tags=["bench", "rest", "river"],
             )
         )
@@ -650,8 +652,11 @@ def seed(session: Session, *, force: bool = True) -> None:
         position={"x": 18, "y": 11},
         size={"width": 1, "height": 1},
         blocks_movement=False,
-        available_interactions=["read"],
-        state={"tile_frame": 83},               # 木牌瓦片
+        available_interactions=["read", "inspect"],
+        state={
+            "tile_frame": 83,
+            "notice_text": "虚拟小镇公告：社区文艺演出将于本周末在广场举行，欢迎居民参与！",
+        },
         tags=["sign", "plaza"],
     ))
     objects.append(WorldObject(
@@ -662,26 +667,27 @@ def seed(session: Session, *, force: bool = True) -> None:
         position={"x": 21, "y": 12},
         size={"width": 1, "height": 1},
         blocks_movement=False,
-        available_interactions=["inspect"],
-        state={"tile_frame": 94},               # 蜂巢/花饰瓦片
-        tags=["plant", "plaza"],
+        available_interactions=["smell", "water", "inspect"],
+        state={"tile_frame": 94, "bloomed": False},
+        tags=["plant", "plaza", "flower"],
     ))
 
-    # 杂货店旁——木桶
+    # 杂货店旁——木桶（可燃）
+    # 原 (36,10) 落在陈伯家建筑区内，移到 (36,12)（建筑外空地）
     objects.append(WorldObject(
         id=_uid("obj_barrel"),
         scene_id=outdoor.id,
-        name="杂货桶",
+        name="杂货木桶",
         object_type="decoration",
-        position={"x": 36, "y": 10},
+        position={"x": 36, "y": 12},
         size={"width": 1, "height": 1},
         blocks_movement=False,
-        available_interactions=["inspect"],
-        state={"tile_frame": 107},              # 深色木桶瓦片
-        tags=["barrel", "grocery"],
+        available_interactions=["inspect", "push", "open"],
+        state={"tile_frame": 107, "flammable": True, "burn_max_ticks": 6},
+        tags=["barrel", "grocery", "flammable"],
     ))
 
-    # 花店门外——盆栽展示
+    # 花店门外——盆栽展示（可看花朵开合状态）
     for fx, fy in ((4, 12), (8, 12)):
         objects.append(WorldObject(
             id=_uid("obj_pot"),
@@ -691,24 +697,162 @@ def seed(session: Session, *, force: bool = True) -> None:
             position={"x": fx, "y": fy},
             size={"width": 1, "height": 1},
             blocks_movement=False,
-            available_interactions=["inspect"],
-            state={"tile_frame": 94},           # 蜂巢/花饰
-            tags=["plant", "flower_shop"],
+            available_interactions=["smell", "water", "inspect"],
+            state={"tile_frame": 94, "bloomed": False},
+            tags=["plant", "flower_shop", "flower"],
+        ))
+
+    # ── 自然事件专用对象 ──────────────────────────────────────────────────────
+
+    # ── 自然事件专用对象（tile_frame 对应 Kenney Tiny Town 精灵图帧序号）───────
+    # tile_frame 速查：3=黄树 4=松树 6=松树2 8=松树3 29=蘑菇 92=大锅 94=蜂巢花 107=木桶
+
+    # 河边钓鱼点（桥两侧 y=6，贴着河岸可钓；tile_frame=55 Tiny Dungeon 圆形瓮/桶，近似临水标记）
+    for fish_x in (11, 17):
+        objects.append(WorldObject(
+            id=_uid("obj_fishing_spot"),
+            scene_id=outdoor.id,
+            name="河边钓鱼点",
+            object_type="nature_spot",
+            position={"x": fish_x, "y": 6},
+            size={"width": 1, "height": 1},
+            blocks_movement=False,
+            available_interactions=["fish", "inspect"],
+            state={"tile_frame": 55, "tileset": "kenney_tiny_dungeon", "fishing_active": False},
+            tags=["fishing_spot", "river"],
+        ))
+
+    # 公园区域松树（tile_frame 4/6/8 = 松树，可燃，鸟栖/萤火虫区）
+    # 公园在学校(x=24-33)以西、道路(x=19-20)以东的狭带(x=21-23)及道路以西的开阔区
+    # 原 (24,17)(27,20) 落在学校建筑内，移至 (22,17)(23,21)
+    _park_tree_frames = [4, 6, 8, 4]
+    for i, (tx, ty) in enumerate(((21, 17), (22, 17), (23, 21), (21, 22))):
+        objects.append(WorldObject(
+            id=_uid("obj_tree_park"),
+            scene_id=outdoor.id,
+            name="公园松树",
+            object_type="plant",
+            position={"x": tx, "y": ty},
+            size={"width": 1, "height": 1},
+            blocks_movement=True,
+            available_interactions=["inspect", "climb", "rest_under"],
+            state={
+                "tile_frame": _park_tree_frames[i],
+                "flammable": True,
+                "burn_max_ticks": 12,
+            },
+            tags=["tree", "flammable", "bird_area", "firefly_area"],
+        ))
+
+    # 公园草丛——蘑菇萌发区（tile_frame 29 = 蘑菇，未萌发时作为"可萌发地"图标）
+    # 原 (25,22)(28,18) 落在学校建筑内，移至 (23,22)(22,18)
+    for mx, my in ((22, 19), (23, 22), (22, 18)):
+        objects.append(WorldObject(
+            id=_uid("obj_mushroom_area"),
+            scene_id=outdoor.id,
+            name="公园草丛",
+            object_type="nature_spot",
+            position={"x": mx, "y": my},
+            size={"width": 1, "height": 1},
+            blocks_movement=False,
+            available_interactions=["pick", "smell", "inspect"],
+            state={"tile_frame": 29, "mushroom_present": False},   # 29=蘑菇图块
+            tags=["mushroom_spawn", "park"],
+        ))
+
+    # 公园果树（tile_frame 3 = 黄叶树，象征挂果；雨后 fruit_ripe 变 True）
+    # 原 (26,17) 落在学校建筑内，移至 (23,17)
+    for frx, fry in ((23, 20), (23, 17)):
+        objects.append(WorldObject(
+            id=_uid("obj_fruit_tree"),
+            scene_id=outdoor.id,
+            name="公园果树",
+            object_type="plant",
+            position={"x": frx, "y": fry},
+            size={"width": 1, "height": 1},
+            blocks_movement=True,
+            available_interactions=["pick", "climb", "inspect"],
+            state={
+                "tile_frame": 3,                                   # 3=黄叶树
+                "fruit_ripe": False,
+                "flammable": True,
+                "burn_max_ticks": 10,
+            },
+            tags=["fruit_tree", "flammable", "bird_area"],
+        ))
+
+    # 道路低洼处——水坑区（tile_frame=60 Tiny Dungeon 木板/平台，近似低洼路面痕迹）
+    # 原 (15,8) 落在小王家建筑内，移至 (11,8)
+    # 原 (20,10) 落在道路格(x=20)，移至 (21,10)
+    for pdx, pdy in ((11, 8), (21, 10), (30, 12)):
+        objects.append(WorldObject(
+            id=_uid("obj_puddle_area"),
+            scene_id=outdoor.id,
+            name="道路低洼处",
+            object_type="nature_spot",
+            position={"x": pdx, "y": pdy},
+            size={"width": 1, "height": 1},
+            blocks_movement=False,
+            available_interactions=["jump_over", "inspect"],
+            state={"tile_frame": 60, "tileset": "kenney_tiny_dungeon", "has_puddle": False},
+            tags=["puddle_area", "road"],
+        ))
+
+    # 广场花园（tile_frame 94 = 蜂巢/花饰，兼萤火虫区；花朵开合由事件动态覆盖层表示）
+    # 原 (19,13) 在竖向道路(x=19)，移至 (18,13)
+    # 原 (22,14) 在横向道路(y=14)，移至 (22,13)
+    # 原 (20,15) 在横向+竖向道路交叉，移至 (21,16)
+    for flx, fly in ((18, 13), (22, 13), (21, 16)):
+        objects.append(WorldObject(
+            id=_uid("obj_garden_flower"),
+            scene_id=outdoor.id,
+            name="广场花园",
+            object_type="plant",
+            position={"x": flx, "y": fly},
+            size={"width": 1, "height": 1},
+            blocks_movement=False,
+            available_interactions=["smell", "water", "inspect"],
+            state={"tile_frame": 94, "bloomed": False, "firefly_active": False},
+            tags=["flower", "firefly_area", "park", "bird_area"],
+        ))
+
+    # 广场周边干草垛（高度可燃；tile_frame 92 = 大锅/营地器皿，近似草垛外形）
+    # 原 (17,14) 在横向道路(y=14)，移至 (17,13)
+    for hx, hy in ((17, 13), (23, 16)):
+        objects.append(WorldObject(
+            id=_uid("obj_haybale"),
+            scene_id=outdoor.id,
+            name="干草垛",
+            object_type="decoration",
+            position={"x": hx, "y": hy},
+            size={"width": 1, "height": 1},
+            blocks_movement=False,
+            available_interactions=["sit", "inspect", "move"],
+            state={"tile_frame": 92, "flammable": True, "burn_max_ticks": 5},
+            tags=["haybale", "flammable"],
         ))
 
     # 咖啡店室内家具
-    # state 中 color 供 TownScene 富化渲染；tile_frame 仅限 1×1 对象
+    # state: tile_frame + tileset 用于 1×1 对象；tags 用于多格家具的图形渲染分支
     cafe_furniture = [
-        # name, x, y, w, h, blk, ints, otype, color
-        ("吧台",   3,  2, 6, 1, True,  ["inspect"],                    "furniture", 0xBB8855),
-        ("咖啡机", 4,  2, 1, 1, True,  ["make_coffee", "inspect"],    "facility",  0x333333),
-        ("小桌",   10, 4, 1, 1, True,  ["sit", "inspect"],            "furniture", 0xBB8855),
-        ("小桌",   10, 7, 1, 1, True,  ["sit", "inspect"],            "furniture", 0xBB8855),
-        ("书架",   2,  8, 1, 2, True,  ["inspect"],                    "furniture", 0x663311),
-        ("椅子",   9,  4, 1, 1, False, ["sit", "inspect"],            "furniture", 0x9B6B3A),
-        ("椅子",   9,  7, 1, 1, False, ["sit", "inspect"],            "furniture", 0x9B6B3A),
+        # name, x, y, w, h, blk, ints, otype, state, tags
+        # 吧台 x=3-8,y=2；咖啡机原在 x=4,y=2 与吧台重叠，移到吧台旁边 x=9,y=2
+        ("吧台",   3,  2, 6, 1, True,  ["inspect"],                 "furniture",
+            {"color": 0xBB8855},                          ["cafe", "desk", "table"]),
+        ("咖啡机", 9,  2, 1, 1, True,  ["make_coffee", "inspect"], "facility",
+            {"tile_frame": 53, "tileset": "kenney_tiny_dungeon"},  ["cafe", "appliance"]),
+        ("小桌",   10, 4, 1, 1, True,  ["sit", "inspect"],         "furniture",
+            {"tile_frame": 60, "tileset": "kenney_tiny_dungeon"},  ["cafe", "table"]),
+        ("小桌",   10, 7, 1, 1, True,  ["sit", "inspect"],         "furniture",
+            {"tile_frame": 60, "tileset": "kenney_tiny_dungeon"},  ["cafe", "table"]),
+        ("书架",   2,  8, 1, 2, True,  ["inspect"],                 "furniture",
+            {"color": 0x663311},                          ["cafe", "bookshelf"]),
+        ("椅子",   9,  4, 1, 1, False, ["sit", "inspect"],         "furniture",
+            {"tile_frame": 61, "tileset": "kenney_tiny_dungeon"},  ["cafe", "chair"]),
+        ("椅子",   9,  7, 1, 1, False, ["sit", "inspect"],         "furniture",
+            {"tile_frame": 61, "tileset": "kenney_tiny_dungeon"},  ["cafe", "chair"]),
     ]
-    for name, x, y, w, h, blk, ints, otype, col in cafe_furniture:
+    for name, x, y, w, h, blk, ints, otype, state, tags in cafe_furniture:
         objects.append(
             WorldObject(
                 id=_uid("obj_cafe"),
@@ -719,23 +863,30 @@ def seed(session: Session, *, force: bool = True) -> None:
                 size={"width": w, "height": h},
                 blocks_movement=blk,
                 available_interactions=ints,
-                state={"color": col},
-                tags=["cafe"],
+                state=state,
+                tags=tags,
             )
         )
 
     # 学校室内
     school_furniture = [
-        # name, x, y, w, h, blk, ints, otype, color
-        ("黑板", 4,  2, 6, 1, True,  ["inspect", "write"],  "furniture", 0x2D5A27),
-        ("讲台", 7,  3, 2, 1, True,  ["inspect"],           "furniture", 0xBB8855),
-        ("课桌", 3,  6, 1, 1, True,  ["sit", "inspect"],   "furniture", 0xC49A6C),
-        ("课桌", 6,  6, 1, 1, True,  ["sit", "inspect"],   "furniture", 0xC49A6C),
-        ("课桌", 9,  6, 1, 1, True,  ["sit", "inspect"],   "furniture", 0xC49A6C),
-        ("课桌", 12, 6, 1, 1, True,  ["sit", "inspect"],   "furniture", 0xC49A6C),
-        ("书架", 2,  4, 1, 4, True,  ["inspect", "browse"], "furniture", 0x663311),
+        # name, x, y, w, h, blk, ints, otype, state, tags
+        ("黑板", 4,  2, 6, 1, True,  ["inspect", "write"],  "furniture",
+            {"color": 0x2D5A27},                         ["school", "blackboard"]),
+        ("讲台", 7,  3, 2, 1, True,  ["inspect"],            "furniture",
+            {"color": 0xBB8855},                         ["school", "desk", "table"]),
+        ("课桌", 3,  6, 1, 1, True,  ["sit", "inspect"],    "furniture",
+            {"tile_frame": 60, "tileset": "kenney_tiny_dungeon"}, ["school", "table"]),
+        ("课桌", 6,  6, 1, 1, True,  ["sit", "inspect"],    "furniture",
+            {"tile_frame": 60, "tileset": "kenney_tiny_dungeon"}, ["school", "table"]),
+        ("课桌", 9,  6, 1, 1, True,  ["sit", "inspect"],    "furniture",
+            {"tile_frame": 60, "tileset": "kenney_tiny_dungeon"}, ["school", "table"]),
+        ("课桌", 12, 6, 1, 1, True,  ["sit", "inspect"],    "furniture",
+            {"tile_frame": 60, "tileset": "kenney_tiny_dungeon"}, ["school", "table"]),
+        ("书架", 2,  4, 1, 4, True,  ["inspect", "browse"],  "furniture",
+            {"color": 0x663311},                         ["school", "bookshelf"]),
     ]
-    for name, x, y, w, h, blk, ints, otype, col in school_furniture:
+    for name, x, y, w, h, blk, ints, otype, state, tags in school_furniture:
         objects.append(
             WorldObject(
                 id=_uid("obj_school"),
@@ -746,20 +897,24 @@ def seed(session: Session, *, force: bool = True) -> None:
                 size={"width": w, "height": h},
                 blocks_movement=blk,
                 available_interactions=ints,
-                state={"color": col},
-                tags=["school"],
+                state=state,
+                tags=tags,
             )
         )
 
     # 杂货店室内
     grocery_furniture = [
-        # name, x, y, w, h, blk, ints, otype, color
-        ("柜台", 3,  2, 6, 1, True,  ["inspect"],           "furniture", 0xBB8855),
-        ("货架", 2,  4, 1, 5, True,  ["inspect", "browse"], "furniture", 0x8B4513),
-        ("货架", 13, 4, 1, 5, True,  ["inspect", "browse"], "furniture", 0x8B4513),
-        ("展台", 7,  5, 2, 3, False, ["inspect", "browse"], "furniture", 0xC49A6C),
+        # name, x, y, w, h, blk, ints, otype, state, tags
+        ("柜台", 3,  2, 6, 1, True,  ["inspect"],           "furniture",
+            {"color": 0xBB8855},                          ["grocery", "desk", "table"]),
+        ("货架", 2,  4, 1, 5, True,  ["inspect", "browse"], "furniture",
+            {"color": 0x8B4513},                          ["grocery", "bookshelf"]),
+        ("货架", 13, 4, 1, 5, True,  ["inspect", "browse"], "furniture",
+            {"color": 0x8B4513},                          ["grocery", "bookshelf"]),
+        ("展台", 7,  5, 2, 3, False, ["inspect", "browse"], "furniture",
+            {"color": 0xC49A6C},                          ["grocery", "desk", "table"]),
     ]
-    for name, x, y, w, h, blk, ints, otype, col in grocery_furniture:
+    for name, x, y, w, h, blk, ints, otype, state, tags in grocery_furniture:
         objects.append(
             WorldObject(
                 id=_uid("obj_grocery"),
@@ -770,23 +925,33 @@ def seed(session: Session, *, force: bool = True) -> None:
                 size={"width": w, "height": h},
                 blocks_movement=blk,
                 available_interactions=ints,
-                state={"color": col},
-                tags=["grocery"],
+                state=state,
+                tags=tags,
             )
         )
 
     # 花店室内家具（新建）
     flower_furniture = [
-        # name, x, y, w, h, blk, ints, otype, color
-        ("工作台",   3,  2, 6, 1, True,  ["inspect", "tend"],        "furniture", 0xBB8855),
-        ("花架·左",  2,  4, 1, 4, True,  ["inspect", "tend", "water"],"facility",  0x4A7C59),
-        ("花架·右",  13, 2, 1, 6, True,  ["inspect", "tend", "water"],"facility",  0x4A7C59),
-        ("花架·后",  4,  2, 8, 1, True,  ["inspect", "tend"],        "facility",  0x4A7C59),
-        ("收银台",   11, 2, 3, 1, True,  ["inspect"],                "furniture", 0xBB8855),
-        ("长椅",     5,  8, 4, 1, False, ["sit", "inspect"],         "furniture", 0x9B6B3A),
-        ("花盆展示", 7,  5, 2, 2, False, ["inspect"],                "plant",     0x4A7C59),
+        # name, x, y, w, h, blk, ints, otype, state, tags
+        # 布局说明（16×12室内，x=1-14 为可用区）：
+        #   y=2 第一内行：工作台(x=3-8) + 收银台(x=10-12)，各不重叠
+        #   y=3-9 左侧：花架·左(x=2)
+        #   y=3-9 右侧：花架·右(x=13)
+        #   去掉 花架·后（与工作台和收银台重叠）
+        ("工作台",   3,  2, 6, 1, True,  ["inspect", "tend"],         "furniture",
+            {"color": 0xBB8855},                             ["flower_shop", "desk", "table"]),
+        ("收银台",   10, 2, 3, 1, True,  ["inspect"],                  "furniture",
+            {"tile_frame": 77, "tileset": "kenney_tiny_dungeon"},      ["flower_shop", "desk"]),
+        ("花架·左",  2,  3, 1, 5, True,  ["inspect", "tend", "water"], "facility",
+            {"color": 0x4A7C59},                             ["flower_shop", "plant"]),
+        ("花架·右",  13, 3, 1, 5, True,  ["inspect", "tend", "water"], "facility",
+            {"color": 0x4A7C59},                             ["flower_shop", "plant"]),
+        ("长椅",     5,  8, 1, 1, False, ["sit", "inspect"],           "furniture",
+            {"tile_frame": 61, "tileset": "kenney_tiny_dungeon"},      ["flower_shop", "chair"]),
+        ("花盆展示", 7,  5, 2, 2, False, ["inspect"],                  "plant",
+            {"color": 0x4A7C59},                             ["flower_shop", "plant"]),
     ]
-    for name, x, y, w, h, blk, ints, otype, col in flower_furniture:
+    for name, x, y, w, h, blk, ints, otype, state, tags in flower_furniture:
         objects.append(
             WorldObject(
                 id=_uid("obj_flower"),
@@ -797,50 +962,75 @@ def seed(session: Session, *, force: bool = True) -> None:
                 size={"width": w, "height": h},
                 blocks_movement=blk,
                 available_interactions=ints,
-                state={"color": col},
-                tags=["flower_shop"],
+                state=state,
+                tags=tags,
             )
         )
 
     # 6 处 NPC 住宅室内家具
-    # (name, x, y, w, h, blocks, interactions, object_type, tags, color)
+    # (name, x, y, w, h, blocks, interactions, object_type, state, tags)
+    # 床用 tag "bed" → TownScene 调用 _drawBed() 渲染专用床图形
+    # 书架用 tag "bookshelf" → 调用 _drawBookshelf() 渲染书脊图形
+    # 椅子/1×1 → tile_frame=61 Tiny Dungeon 椅子
+    # 桌子/1×1 → tile_frame=60 Tiny Dungeon 桌子
+    # 桌子/多格 → tag "desk"/"table" → 调用 _drawDesk()
     home_furniture_templates: dict[str, list[tuple]] = {
         "xiaofang": [
-            ("床",   5, 2, 3, 2, True,  ["sleep", "inspect"], "furniture", ["bed"],       0x8899BB),
-            ("书桌", 10, 2, 2, 1, True,  ["inspect"],          "furniture", ["desk"],      0xBB8855),
-            ("书架", 2,  4, 1, 3, True,  ["inspect"],          "furniture", ["bookshelf"], 0x663311),
-            ("椅子", 10, 3, 1, 1, False, ["sit", "inspect"],   "furniture", ["chair"],     0x9B6B3A),
+            ("床",   5, 2, 3, 2, True,  ["sleep", "inspect"], "furniture",
+                {"color": 0x8899BB}, ["home", "bed"]),
+            ("书桌", 10, 2, 2, 1, True,  ["inspect"],           "furniture",
+                {"color": 0xBB8855}, ["home", "desk", "table"]),
+            ("书架", 2,  4, 1, 3, True,  ["inspect"],           "furniture",
+                {"color": 0x663311}, ["home", "bookshelf"]),
+            ("椅子", 10, 3, 1, 1, False, ["sit", "inspect"],    "furniture",
+                {"tile_frame": 61, "tileset": "kenney_tiny_dungeon"}, ["home", "chair"]),
         ],
         "xiaoming": [
-            ("床",   3, 2, 3, 2, True,  ["sleep", "inspect"], "furniture", ["bed"],       0x8899BB),
-            ("书桌", 8,  2, 3, 1, True,  ["study", "inspect"], "furniture", ["desk"],      0xBB8855),
-            ("书架", 12, 3, 1, 4, True,  ["inspect"],          "furniture", ["bookshelf"], 0x663311),
+            ("床",   3, 2, 3, 2, True,  ["sleep", "inspect"], "furniture",
+                {"color": 0x7799CC}, ["home", "bed"]),
+            ("书桌", 8,  2, 3, 1, True,  ["study", "inspect"], "furniture",
+                {"color": 0xBB8855}, ["home", "desk", "table"]),
+            ("书架", 12, 3, 1, 4, True,  ["inspect"],           "furniture",
+                {"color": 0x663311}, ["home", "bookshelf"]),
         ],
         "xiaowang": [
-            ("床",     3, 2, 3, 2, True,  ["sleep", "inspect"],            "furniture", ["bed"],   0x8899BB),
-            ("工作台", 8, 2, 4, 1, True,  ["work", "use_computer", "inspect"], "facility", ["desk"], 0x333355),
-            ("椅子",   9, 3, 1, 1, False, ["sit", "inspect"],               "furniture", ["chair"], 0x9B6B3A),
+            ("床",     3, 2, 3, 2, True,  ["sleep", "inspect"],               "furniture",
+                {"color": 0x334466}, ["home", "bed"]),
+            ("工作台", 8, 2, 4, 1, True,  ["work", "use_computer", "inspect"], "facility",
+                {"color": 0x333355}, ["home", "desk", "table"]),
+            ("椅子",   9, 3, 1, 1, False, ["sit", "inspect"],                  "furniture",
+                {"tile_frame": 61, "tileset": "kenney_tiny_dungeon"}, ["home", "chair"]),
         ],
         "linna": [
-            ("床",   5, 2, 3, 2, True,  ["sleep", "inspect"], "furniture", ["bed"],       0x8899BB),
-            ("书架", 2, 2, 1, 5, True,  ["inspect"],          "furniture", ["bookshelf"], 0x663311),
-            ("桌子", 10, 5, 2, 1, True,  ["inspect"],          "furniture", ["table"],     0xBB8855),
-            ("椅子", 10, 6, 1, 1, False, ["sit", "inspect"],   "furniture", ["chair"],     0x9B6B3A),
+            ("床",   5, 2, 3, 2, True,  ["sleep", "inspect"], "furniture",
+                {"color": 0xCC9988}, ["home", "bed"]),
+            ("书架", 2, 2, 1, 5, True,  ["inspect"],           "furniture",
+                {"color": 0x663311}, ["home", "bookshelf"]),
+            ("桌子", 10, 5, 2, 1, True,  ["inspect"],           "furniture",
+                {"color": 0xBB8855}, ["home", "desk", "table"]),
+            ("椅子", 10, 6, 1, 1, False, ["sit", "inspect"],    "furniture",
+                {"tile_frame": 61, "tileset": "kenney_tiny_dungeon"}, ["home", "chair"]),
         ],
         "chenbo": [
-            ("床",     3, 2, 3, 2, True,  ["sleep", "inspect"], "furniture", ["bed"],   0x8899BB),
-            ("老椅子", 9, 4, 1, 1, False, ["sit", "inspect"],   "furniture", ["chair"], 0x9B6B3A),
-            ("茶桌",   8, 3, 2, 1, True,  ["inspect"],          "furniture", ["table"], 0xBB8855),
+            ("床",     3, 2, 3, 2, True,  ["sleep", "inspect"], "furniture",
+                {"color": 0x887755}, ["home", "bed"]),
+            ("老椅子", 9, 4, 1, 1, False, ["sit", "inspect"],    "furniture",
+                {"tile_frame": 61, "tileset": "kenney_tiny_dungeon"}, ["home", "chair"]),
+            ("茶桌",   8, 3, 2, 1, True,  ["inspect"],           "furniture",
+                {"color": 0xBB8855}, ["home", "desk", "table"]),
         ],
         "ayan": [
-            ("床",   3, 2, 3, 2, True,  ["sleep", "inspect"], "furniture", ["bed"],   0x8899BB),
-            ("花架", 9, 2, 2, 3, True,  ["inspect", "tend"],  "facility",  ["plant"], 0x4A7C59),
-            ("猫窝", 12, 6, 2, 1, False, ["inspect"],          "furniture", ["pet"],   0xE8C4A0),
+            ("床",   3, 2, 3, 2, True,  ["sleep", "inspect"], "furniture",
+                {"color": 0xCC99BB}, ["home", "bed"]),
+            ("花架", 9, 2, 2, 3, True,  ["inspect", "tend"],   "facility",
+                {"color": 0x4A7C59}, ["home", "plant"]),
+            ("猫窝", 12, 6, 2, 1, False, ["inspect"],           "furniture",
+                {"color": 0xE8C4A0}, ["home", "pet"]),
         ],
     }
     for key, furniture_list in home_furniture_templates.items():
         hs = home_scenes[key]
-        for fname, fx, fy, fw, fh, fblk, fints, fotype, ftags, fcol in furniture_list:
+        for fname, fx, fy, fw, fh, fblk, fints, fotype, fstate, ftags in furniture_list:
             objects.append(
                 WorldObject(
                     id=_uid(f"obj_home_{key}"),
@@ -851,8 +1041,8 @@ def seed(session: Session, *, force: bool = True) -> None:
                     size={"width": fw, "height": fh},
                     blocks_movement=fblk,
                     available_interactions=fints,
-                    state={"color": fcol},
-                    tags=["home"] + ftags,
+                    state=fstate,
+                    tags=ftags,
                 )
             )
 
