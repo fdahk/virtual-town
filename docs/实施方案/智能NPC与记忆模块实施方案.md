@@ -180,6 +180,28 @@ importance =
 
 LLM 不直接返回自然语言行动，而是选择工具。
 
+### 6.0 决策管线流程（当前实现）
+
+```text
+perceive()
+  ├── 读取附近实体、当前场景地点
+  └── 读取 Redis 不可达黑名单（agent:{id}:unreachable）并过滤感知列表
+
+asyncio.gather(
+  retrieve()    → embed(perception_query) + pgvector 记忆检索
+  plan_ctx()    → get_current_context()（daily_plan / task_decomp / segment）
+)
+
+chat_json()     → qwen-plus / qwen-max，返回 AgentDecisionOutput
+
+executor.execute_batch()
+  ├── 成功 → 更新引擎内存态、写 AgentAction、触发世界事件
+  └── TARGET_NOT_REACHABLE → _mark_unreachable() → Redis SADD TTL=300s
+```
+
+**并行化优化**：`retrieve` 与 `plan_ctx` 通过 `asyncio.gather` 并发执行，
+不相互阻塞，节省约 6s/决策周期。
+
 ### 6.1 Human Agent 工具
 
 ```json

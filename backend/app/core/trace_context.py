@@ -9,7 +9,8 @@ Trace context（可观测性基础设施 14.1）。
 - 所有结构化日志自动携带 trace 字段（见 ``logging.py``）。
 - 任何业务代码只应通过此模块读写 trace 上下文，避免直接操作 contextvars。
 
-使用方式：
+**观测语义（MVP）**：``trace_id`` 与仿真 ``world_tick`` 的对应关系、同 trace 下多条 LLM 的原因，
+详见 ``docs/实施方案/可观测性与错误处理方案.md`` §3.3。
 
 .. code-block:: python
 

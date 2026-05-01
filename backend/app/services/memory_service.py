@@ -167,13 +167,17 @@ class MemoryService:
 
                 queue = get_task_queue()
                 if queue is not None:
+                    # priority=9 → low 队列，让 agent_decision（high 队列 priority≤3）
+                    # 始终优先于 embedding 任务被 worker 消费，消除 embedding 积压
+                    # 导致决策任务等待的问题（性能优化 §P1）。
                     await queue.enqueue(
                         task_type="write_memory_embedding",
                         payload={"memory_id": mem.id},
                         entity_id=agent_id,
                         idempotency_extra=mem.id,
+                        priority=9,
                         max_retries=2,
-                        deadline_seconds=60.0,
+                        deadline_seconds=120.0,
                     )
                     return mem
             except Exception:

@@ -318,7 +318,8 @@ class SimulationEngine:
 
         # 4. AI Decision Tick（每个 Agent 独立按游戏分钟间隔决策）
         await self._decide_all(now_dt)
-        await self._maybe_reflect_batch(now_dt)
+        # 反思/日结通过 daily_reflection 任务异步执行，不阻塞世界 tick
+        await self._enqueue_reflect_batch(now_dt)
 
         # 5. 汇总 updates
         for agent in self._agents.values():
@@ -884,15 +885,22 @@ class SimulationEngine:
     # 反思 / 日结
     # ------------------------------------------------------------------
 
-    async def _maybe_reflect_batch(self, now_dt: datetime) -> None:
+    async def _enqueue_reflect_batch(self, now_dt: datetime) -> None:
         """
-        为 1-2 个"累积事件最多"的 Agent 跑反思/日结。
-        - 避免每 tick 全量反思（LLM 成本高）。
-        - 严格守护：任何失败被吞，保证引擎不崩溃。
-        """
-        from app.domain.memory.reflection import maybe_daily_summary, maybe_reflect
+        把反思/日结投递到 daily_reflection 任务队列，不在 tick 内同步执行。
 
-        # 每 10 个游戏分钟最多触发一次
+        替代原来的 _maybe_reflect_batch 内联 LLM 调用（会阻塞 tick 5-10s）。
+        改为异步入队后，worker 独立执行，世界时钟不受影响。
+        依然维护 _last_reflect_at / _last_summary_day 在内存中做频率控制，
+        避免过度入队。
+        """
+        from app.domain.tasks.queue import get_task_queue
+
+        queue = get_task_queue()
+        if queue is None:
+            return
+
+        # 每 10 个游戏分钟触发一次反思入队
         candidates = [
             agent
             for agent in self._agents.values()
@@ -904,32 +912,29 @@ class SimulationEngine:
         ]
         if not candidates:
             return
-        # 取 1 个跑反思 + 尝试所有跑日结（日结内部有 day 粒度去重，廉价）
+
         self._rng.shuffle(candidates)
         target = candidates[0]
-        try:
-            async with self._session_factory() as session:
-                reflections = await maybe_reflect(
-                    session, target.id, world_time=now_dt
-                )
-                if reflections:
-                    self._pending_events.append(
-                        _new_event(
-                            simulation_id=self._sim_id(),
-                            event_type="memory.created",
-                            actor_entity_id=target.id,
-                            scene_id=target.scene_id,
-                            description=f"{target.name} 形成了新的想法：{reflections[0].description[:40]}…",
-                            importance=4,
-                            payload={"reflection_ids": [m.id for m in reflections]},
-                            created_at=utcnow(),
-                        )
-                    )
-                self._last_reflect_at[target.id] = now_dt
-        except Exception:
-            logger.exception("reflection failed for %s", target.id)
 
-        # 日结：一天一次
+        try:
+            await queue.enqueue(
+                task_type="daily_reflection",
+                payload={
+                    "agent_id": target.id,
+                    "world_time": now_dt.isoformat(),
+                },
+                entity_id=target.id,
+                simulation_id=self._sim_id(),
+                simulation_step=self._step,
+                priority=8,  # low 队列，低于决策任务
+                deadline_seconds=120.0,
+            )
+            # 入队成功后更新频率控制时间戳（防止同一 agent 在下一 tick 又被入队）
+            self._last_reflect_at[target.id] = now_dt
+        except Exception:
+            logger.debug("enqueue daily_reflection failed for %s", target.id, exc_info=True)
+
+        # 日结：一天一次，每个 agent 独立控制
         day_key = now_dt.strftime("%Y-%m-%d")
         for agent in self._agents.values():
             if agent.is_player:
@@ -937,26 +942,23 @@ class SimulationEngine:
             if self._last_summary_day.get(agent.id) == day_key:
                 continue
             try:
-                async with self._session_factory() as session:
-                    mem = await maybe_daily_summary(
-                        session, agent.id, world_time=now_dt
-                    )
-                    if mem is not None:
-                        self._pending_events.append(
-                            _new_event(
-                                simulation_id=self._sim_id(),
-                                event_type="memory.created",
-                                actor_entity_id=agent.id,
-                                scene_id=agent.scene_id,
-                                description=f"{agent.name} 写下了今日总结：{mem.description[:40]}…",
-                                importance=3,
-                                payload={"summary_id": mem.id},
-                                created_at=utcnow(),
-                            )
-                        )
-                        self._last_summary_day[agent.id] = day_key
+                await queue.enqueue(
+                    task_type="daily_reflection",
+                    payload={
+                        "agent_id": agent.id,
+                        "world_time": now_dt.isoformat(),
+                    },
+                    entity_id=agent.id,
+                    simulation_id=self._sim_id(),
+                    # 日结用日期字符串作为幂等 extra，保证一天只执行一次
+                    idempotency_extra=f"summary:{day_key}",
+                    simulation_step=self._step,
+                    priority=8,
+                    deadline_seconds=120.0,
+                )
+                self._last_summary_day[agent.id] = day_key
             except Exception:
-                logger.exception("daily summary failed for %s", agent.id)
+                logger.debug("enqueue daily_reflection(summary) failed for %s", agent.id, exc_info=True)
 
 
 class _ORMStateView:

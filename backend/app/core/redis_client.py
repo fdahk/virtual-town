@@ -297,11 +297,28 @@ def key_task_idempotency(idempotency_key: str) -> str:
     return f"task:idempotency:{idempotency_key}"
 
 
+def key_agent_unreachable(agent_id: str) -> str:
+    """不可达目标黑名单：agent:{id}:unreachable。
+    存储 location_id/entity_id 集合，TTL 5 分钟。
+    tool 失败后写入；决策前读取并过滤，避免 LLM 反复尝试不可达目标。
+    """
+    return f"agent:{agent_id}:unreachable"
+
+
+def key_embedding_cache(text_hash: str) -> str:
+    """Embedding 向量缓存：embed:{text_hash}。
+    相同文本的 embedding 结果缓存 1 小时，减少重复 API 调用。
+    """
+    return f"embed:{text_hash}"
+
+
 __all__ = [
     "RedisService",
     "get_redis",
     "key_agent_runtime",
+    "key_agent_unreachable",
     "key_dialogue_recent",
+    "key_embedding_cache",
     "key_scene_active_entities",
     "key_short_memory",
     "key_sim_state",

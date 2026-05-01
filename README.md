@@ -186,7 +186,7 @@ npm run gen:types
 - **World Events**：世界事件流，按事件类型、实体、场景筛选。
 - **Obs Events**：跨模块观测事件流（trace_id / category / level）。
 - **Agent Runtime**：输入 `agent_id` 查看档案 + 状态 + Redis 热数据 + 最近事件 + 最近记忆。
-- **Traces**：按 `trace_id` 查一次决策 / 玩家 query 的完整 span 树 + LLM/Tool/Task 详情。
+- **Traces**：按 `trace_id` 聚合观测事件与 LLM / Tool / Task 明细。**仿真链路**下 MVP 通常为 **一整帧 world tick + 从这帧快照延续出去的异步任务（如 RQ）** 共用一个 ID；每条 **HTTP** 请求另起 trace。详见 `docs/实施方案/可观测性与错误处理方案.md` §3.3。
 - **LLM Calls / Tool Calls / Tasks / Errors**：全量审计表 + 聚合。
 - **Health**：`/api/health/db`、`/api/health/redis`、`/api/health/llm` 实时探测。
 

@@ -172,8 +172,63 @@ Pydantic 校验参数
 | JSON 解析失败 | 自动重试，仍失败则 fallback |
 | 工具不存在 | 拒绝执行并记录错误 |
 | 参数非法 | 要求模型重试或使用默认工具 |
-| 目标不可达 | 返回 blocked，触发重新规划 |
-| Embedding 失败 | 先写结构化记忆，稍后补 embedding |
+| 目标不可达 | 写入 Redis 不可达黑名单（TTL 5 分钟），下次感知过滤 |
+| Embedding 失败 | 先写结构化记忆，稍后补 embedding（low 队列） |
+
+---
+
+## 8.1 不可达目标熔断机制（性能优化）
+
+当 `move_to_location` / `move_to_entity` 返回 `TARGET_NOT_REACHABLE` 时，
+系统将目标 id 写入 Redis 集合 `agent:{id}:unreachable`（TTL 300s）。
+
+下一次决策中 `_perceive()` 会读取该集合，并从感知地点列表和附近实体列表中
+过滤掉已知不可达的目标，LLM prompt 中不再包含这些选项。
+
+这防止了"工具失败 → 再次入队 → LLM 再次选同一目标 → 再次失败"的无限循环，
+单条 trace 预计节省约 75s（6 轮 × ~12s/轮）。
+
+```text
+move_to_location FAIL (TARGET_NOT_REACHABLE)
+  ↓
+_mark_unreachable(agent_id, location_id) → Redis SADD agent:{id}:unreachable TTL=300s
+  ↓
+下次 _perceive() → _get_unreachable_set() → 过滤感知地点
+  ↓
+LLM 不再看到不可达选项 → 选择其他目标
+```
+
+---
+
+## 8.2 决策链路并行化（性能优化）
+
+`decide_with_llm()` 中的 `_retrieve()`（记忆检索 + embedding）与
+`get_planning_service().get_current_context()`（规划上下文）互相不依赖，
+改用 `asyncio.gather()` 并发执行，节省约 6s/决策周期。
+
+```text
+感知 _perceive()（串行，作为 _retrieve 的输入）
+  ↓
+asyncio.gather(
+  _retrieve(perception),       # embed(query) + pgvector 检索
+  _safe_plan_ctx(),            # daily_plan + task_decomp 查询
+)
+  ↓
+LLM chat_json（依赖两者结果，串行）
+```
+
+---
+
+## 8.3 Embedding 向量缓存（性能优化）
+
+`EmbeddingService.embed(text)` 在调用 LLM API 前先查 Redis 缓存：
+
+- Key：`embed:{sha256(text)[:32]}`
+- TTL：3600s（1 小时）
+- 命中缓存时直接返回，不调用 LLM API
+- 写入缓存只在成功返回向量时执行（不缓存 None）
+
+重复查询相同文本时可节省约 200–600ms/次，同时降低 API 费用。
 
 ---
 

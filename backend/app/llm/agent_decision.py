@@ -4,8 +4,10 @@ LLM 驱动的 Agent 决策管线。
 实现 `智能NPC与记忆模块实施方案.md` 的 perceive → retrieve → plan → execute 流程：
 
 1. perceive：从引擎内存读取 Agent 自身 + 附近实体 + 附近地点 + 当前 hazard。
+   - 读取 Redis 不可达黑名单，从感知列表中剔除短期内无法到达的地点/实体，
+     防止 LLM 反复选择必然失败的目标（性能优化）。
 2. retrieve：MemoryService.search 取最相关的 k 条记忆。
-3. plan：把角色档案、状态、感知、记忆、可用工具 catalog 拼进 prompt，调 LLM chat_json。
+3. plan：retrieve + planning_context 并发执行后，拼 prompt 调 LLM chat_json。
 4. execute：ToolExecutor 依次执行 LLM 返回的 tool_calls，任何失败都不会打断仿真。
 
 未配置 LLM 或调用失败时返回 None，由引擎 fallback 到规则版 rule_agent。
@@ -13,6 +15,7 @@ LLM 驱动的 Agent 决策管线。
 
 from __future__ import annotations
 
+import asyncio
 from datetime import datetime
 from typing import Any
 
@@ -75,16 +78,21 @@ async def decide_with_llm(
         return None
 
     perception = await _perceive(session, agent, state)
-    memories = await _retrieve(session, agent_id, perception, world_time)
 
-    # 层次化规划：daily → segment → task（阶段 15.1-2）
-    plan_ctx: dict[str, Any] = {}
-    try:
-        plan_ctx = await get_planning_service().get_current_context(
-            session, agent, world_time=world_time
-        )
-    except Exception:
-        logger.debug("planning context failed", exc_info=True)
+    # retrieve + planning_context 并发执行，两者互相不依赖，可合并等待
+    async def _safe_plan_ctx() -> dict[str, Any]:
+        try:
+            return await get_planning_service().get_current_context(
+                session, agent, world_time=world_time
+            )
+        except Exception:
+            logger.debug("planning context failed", exc_info=True)
+            return {}
+
+    memories, plan_ctx = await asyncio.gather(
+        _retrieve(session, agent_id, perception, world_time),
+        _safe_plan_ctx(),
+    )
 
     registry = get_tool_registry()
     tool_catalog = registry.prompt_catalog(entity_type=agent.entity_type)
@@ -193,22 +201,44 @@ async def decide_with_llm(
 # ---------------------------------------------------------------------------
 
 
+async def _get_unreachable_set(agent_id: str) -> set[str]:
+    """读取 Redis 不可达黑名单（best-effort，失败返回空集合）。"""
+    try:
+        from app.core.redis_client import get_redis, key_agent_unreachable
+
+        members = await get_redis().set_members(key_agent_unreachable(agent_id))
+        return set(members)
+    except Exception:
+        return set()
+
+
 async def _perceive(
     session: AsyncSession, agent: Agent, state: AgentState
 ) -> dict[str, Any]:
-    """只读取数据库层的场景 & 附近实体，非侵入。"""
-    nearby_entities: list[tuple[str, int, int, str]] = []
-    rows = (
-        await session.execute(
+    """只读取数据库层的场景 & 附近实体，非侵入。
+
+    同时读取 Redis 不可达黑名单，过滤掉当前 ai_tick 窗口内已知不可达的
+    地点/实体，防止 LLM 反复选择必然失败的目标。
+    """
+    # 并发读：不可达集合与附近实体查询互相独立
+    unreachable_set, agent_state_rows = await asyncio.gather(
+        _get_unreachable_set(agent.id),
+        session.execute(
             select(AgentState).where(
                 AgentState.scene_id == state.scene_id,
                 AgentState.agent_id != agent.id,
             )
-        )
-    ).scalars().all()
+        ),
+    )
+    rows = agent_state_rows.scalars().all()
+
+    nearby_entities: list[tuple[str, int, int, str]] = []
     for r in rows:
         dist = abs(r.x - state.x) + abs(r.y - state.y)
         if dist > 10:
+            continue
+        # 不可达黑名单过滤：跳过已知此轮无法抵达的实体
+        if r.agent_id in unreachable_set:
             continue
         other = await session.get(Agent, r.agent_id)
         if other is None:
@@ -216,13 +246,14 @@ async def _perceive(
         nearby_entities.append((other.name, r.x, r.y, other.entity_type))
     nearby_entities.sort(key=lambda t: abs(t[1] - state.x) + abs(t[2] - state.y))
 
-    # 当前场景的地点集
+    # 当前场景的地点集，过滤不可达条目后呈现给 LLM
     locs = (
         await session.execute(
             select(Location).where(Location.scene_id == state.scene_id)
         )
     ).scalars().all()
-    loc_items = [f"{l.id}: {l.name}" for l in locs[:16]]
+    reachable_locs = [l for l in locs if l.id not in unreachable_set]
+    loc_items = [f"{l.id}: {l.name}" for l in reachable_locs[:16]]
 
     text_lines: list[str] = []
     text_lines.append(f"- 你当前位置 scene={state.scene_id} (x={state.x}, y={state.y}), 状态={state.state}")
@@ -237,6 +268,8 @@ async def _perceive(
     if loc_items:
         text_lines.append("- 当前场景的地点 id 供你选择（示例 id 开头）：")
         text_lines.append("    " + "; ".join(loc_items))
+    if unreachable_set:
+        text_lines.append(f"- 本轮不可到达（已屏蔽）：{', '.join(sorted(unreachable_set)[:8])}")
 
     return {"text": "\n".join(text_lines), "nearby": nearby_entities}
 

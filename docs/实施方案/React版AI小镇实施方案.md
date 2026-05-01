@@ -129,19 +129,24 @@ React 负责产品界面，Phaser 负责游戏画面，FastAPI 负责仿真服�
 │                 FastAPI Backend               │
 │                                              │
 │  ├── SimulationRuntime：仿真时钟、tick、广播      │
-│  ├── SimulationEngine：决策、持久化、事件        │
+│  ├── SimulationEngine：决策入队、持久化、事件广播  │
+│  │   └── _enqueue_reflect_batch()：反思/日结异步入 low 队列，不阻塞 tick │
 │  ├── Agent / World / Memory / Player Service：REST 门面 │
 │  ├── Dialogue / Planning / Safety / Tasks：对话、层次规划、限流审计、RQ 异步任务 │
 │  ├── Observer + EventRouter：可观测性与领域订阅   │
-│  ├── LLM：`app/llm`（chat_json / embed / tools）   │
+│  ├── LLM：`app/llm`（chat_json / embed[+缓存] / tools）│
+│  │   ├── EmbeddingService：Redis 缓存 TTL 1h，减少重复 API 调用 │
+│  │   └── agent_decision：retrieve ‖ plan_ctx（asyncio.gather）│
 │  └── WebSocket：`gateway.py`（统一信封推送）       │
 └──────────────┬────────────────────┬──────────┘
                │                    │
-       PostgreSQL + pgvector        Redis（会话、对话窗、RQ）
-       ├── 地图/Agent/仿真/记忆      ├── agent_decision、embedding、dialogue …
-       ├── tasks / agent_plans     └── TTL、限流计数等键空间（见 Redis 封装）
-       ├── 观测与 tool/llm 审计
-       └── …
+       PostgreSQL + pgvector        Redis（会话、队列、缓存）
+       ├── 地图/Agent/仿真/记忆      ├── vt:high    — agent_decision（priority≤3）
+       ├── tasks / agent_plans      ├── vt:default — dialogue/relationship（priority 4-6）
+       ├── 观测与 tool/llm 审计      ├── vt:low     — embedding(p=9)、reflection(p=8）
+       └── …                       ├── agent:{id}:unreachable TTL 300s（不可达黑名单）
+                                   ├── embed:{hash} TTL 3600s（embedding 向量缓存）
+                                   └── agent runtime / dialogue / scene entities
 ```
 
 ---
@@ -742,6 +747,48 @@ while simulation.running:
 - 对不同地形设置不同移动成本。
 - 支持建筑内部地图。
 - 支持人群拥堵和排队。
+
+---
+
+## 13.5 响应延迟优化（2026-05-01 落地）
+
+基于链路追踪数据（trace_c99a781e6279，总耗时 ~182s）识别出三类主要瓶颈，已完成以下优化：
+
+### 不可达目标熔断
+
+| 位置 | 改动 |
+|------|------|
+| `app/llm/tools/world_tools.py` | `TARGET_NOT_REACHABLE` 时调用 `_mark_unreachable()` 写入 Redis 黑名单 |
+| `app/llm/agent_decision.py` | `_perceive()` 读取黑名单，过滤感知地点和附近实体列表 |
+| `app/core/redis_client.py` | 新增 `key_agent_unreachable()` key 构造器（TTL 300s） |
+
+效果：断开"工具失败→再次入队→LLM 再次选同一目标→再次失败"循环，节省约 75s/trace。
+
+### 决策链路并行化
+
+`decide_with_llm()` 中的记忆检索（embed + pgvector）与规划上下文查询（planning）
+由串行改为 `asyncio.gather()` 并发，节省约 6s/决策周期。
+
+### Embedding 向量缓存
+
+`EmbeddingService.embed()` 新增 Redis 缓存层（key: `embed:{sha256[:32]}`，TTL 1h），
+相同文本直接命中缓存，减少重复 API 调用。
+
+### 任务队列优先级分离
+
+| 任务 | 队列 | 优先级 |
+|------|------|--------|
+| `agent_decision` | `vt:high` | 5 |
+| `write_memory_embedding` | `vt:low` | 9 |
+| `daily_reflection` | `vt:low` | 8 |
+
+`write_memory_embedding` 降为 low 队列，消除 embedding 积压对决策任务的影响（trace 中 ~71s 积压）。
+
+### 反思任务异步化
+
+`_maybe_reflect_batch()`（内联 LLM 调用，偶发阻塞 tick 5-10s）替换为
+`_enqueue_reflect_batch()`，投递 `daily_reflection` 任务到 low 队列，
+world tick 不再等待反思 LLM 结果。
 
 ---
 

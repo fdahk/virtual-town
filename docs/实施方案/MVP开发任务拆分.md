@@ -356,6 +356,7 @@
 ### 14.1 后端基础设施
 
 - `trace_id` / `span_id` / `parent_span_id` 在跨模块调用链中传递（contextvars 实现，REST 入口、WS 入口、tick 入口、任务投递入口注入）。
+- **`trace_id` 语义（MVP）**：仿真侧每条 trace 主要由 **单次 `world_tick` 打点**拉起，RQ worker 沿用入队快照，故「同一 trace」≈ 一帧 tick + 延后完成的异步任务；REST 每条请求独立 trace。详见 `docs/实施方案/可观测性与错误处理方案.md` §3.3。
 - 所有结构化日志带：`request_id / simulation_id / trace_id / span_id / agent_id / player_id / task_id / event_id`。
 - 错误码统一治理：按 `WORLD_ / AGENT_ / MEMORY_ / LLM_ / TOOL_ / PLAYER_ / WS_ / DB_` 前缀分类，集中在一份 enum 中维护。
 
@@ -375,7 +376,7 @@
 - `GET /api/observability/dashboard`（实时聚合：tick / WS 在线数 / LLM 平均耗时 / 错误率）。
 - `GET /api/observability/events?...`（多维度筛选 world events / observability events）。
 - `GET /api/observability/agents/{id}/runtime`（实时状态 + 最近 30 条事件 + 最近记忆变更）。
-- `GET /api/observability/traces/{trace_id}`（一次决策 / 一次玩家 query 的完整 span 树）。
+- `GET /api/observability/traces/{trace_id}`（聚合该 `trace_id` 的事件与 LLM / Tool / Task；**粒度以 §14.1 + 可观测性方案 §3.3 为准**——MVP 下多为一整帧 tick 与其异步延续，而非狭义「单次 NPC 决策」独占一条 trace）。
 - `GET /api/observability/llm-calls`、`/tool-calls`、`/tasks`、`/memories` 列表。
 - `WS /ws/observability/{simulation_id}` 推送实时观测事件。
 - 健康检查：`/health/db`、`/health/redis`、`/health/llm`（不发实际 LLM 调用，只校验 key/配置）。

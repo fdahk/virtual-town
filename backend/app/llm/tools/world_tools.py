@@ -3,6 +3,12 @@
 
 这些工具负责产生 AgentAction，修改引擎内存中的 path，但不直接改数据库。
 数据库持久化由 SimulationEngine 的 tick 循环统一处理。
+
+不可达黑名单（性能优化）：
+  当 move_to_location / move_to_entity 返回 TARGET_NOT_REACHABLE 时，
+  将目标 id 写入 Redis 集合 agent:{id}:unreachable（TTL 5 分钟）。
+  决策前置过滤（agent_decision.py）读取该集合并从感知列表中剔除，
+  防止 LLM 在同一 ai_tick 窗口内反复尝试不可达目标。
 """
 
 from __future__ import annotations
@@ -18,6 +24,21 @@ from app.db.models import AgentAction, AgentState, Location, WorldObject
 from app.domain.world.grid import astar
 from app.domain.world.scene_cache import get_scene_cache
 from app.llm.tools.base import Tool, ToolCall, ToolContext, ToolResult, ToolSpec
+
+# 不可达目标黑名单 TTL（秒）— 与 ai_tick_minutes 对齐，避免跨决策窗口误屏蔽
+_UNREACHABLE_TTL = 300
+
+
+async def _mark_unreachable(agent_id: str, target_id: str) -> None:
+    """把目标写入当前 agent 的不可达黑名单（best-effort，失败不影响主流程）。"""
+    try:
+        from app.core.redis_client import get_redis, key_agent_unreachable
+
+        redis = get_redis()
+        key = key_agent_unreachable(agent_id)
+        await redis.set_add(key, target_id, ttl_seconds=_UNREACHABLE_TTL)
+    except Exception:
+        pass
 
 
 # ---------------------------------------------------------------------------
@@ -134,6 +155,7 @@ class MoveToLocationTool(Tool):
             # 这里直接让 agent 在当前场景继续寻路到本场景的 portal from_tile（以 portal 最小匹配）。
             portal_from = await _nearest_portal_to(ctx, loc.scene_id)
             if portal_from is None:
+                await _mark_unreachable(ctx.agent_id, args.location_id)
                 return self.fail(
                     call,
                     "TARGET_NOT_REACHABLE",
@@ -150,6 +172,7 @@ class MoveToLocationTool(Tool):
             return self.fail(call, "INTERNAL_ERROR", "scene grid not loaded")
         path = astar(grid, ctx.position, entry, avoid_hazards=True)
         if not path:
+            await _mark_unreachable(ctx.agent_id, args.location_id)
             return self.fail(call, "TARGET_NOT_REACHABLE", "no valid path", retryable=True)
 
         action_id = await _apply_path_to_engine(
@@ -239,9 +262,11 @@ class MoveToEntityTool(Tool):
         # 取靠近 target 的可走 tile
         goal = _find_free_adjacent(grid, (target.x, target.y), args.distance)
         if goal is None:
+            await _mark_unreachable(ctx.agent_id, args.target_entity_id)
             return self.fail(call, "TARGET_NOT_REACHABLE", "no free tile near target")
         path = astar(grid, ctx.position, goal, avoid_hazards=True)
         if not path:
+            await _mark_unreachable(ctx.agent_id, args.target_entity_id)
             return self.fail(call, "TARGET_NOT_REACHABLE", "no valid path", retryable=True)
         action_id = await _apply_path_to_engine(
             ctx,
