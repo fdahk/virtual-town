@@ -79,11 +79,28 @@ def get_tool_registry() -> ToolRegistry:
             animal_tools,
             dialogue_tools,
             memory_tools,
+            social_tools,
             state_tools,
             world_tools,
         )
 
-        for mod in (world_tools, dialogue_tools, animal_tools, memory_tools, state_tools):
+        modules = [
+            world_tools,
+            dialogue_tools,
+            social_tools,
+            animal_tools,
+            memory_tools,
+            state_tools,
+        ]
+        # 阶段 19 PR4：生活类工具（work / eat / rest / browse / observe）
+        try:
+            from app.llm.tools import life_tools  # noqa: WPS433
+
+            modules.append(life_tools)
+        except ImportError:
+            pass
+
+        for mod in modules:
             for tool in mod.build_tools():
                 reg.register(tool)
         _registry = reg

@@ -102,6 +102,11 @@ class EngineAgent:
     fear: float = 0.0
     dirty: bool = True  # 是否需要同步到数据库
     is_player: bool = False
+    # 阶段 19：忙碌 / 可打断 / 优先级 / 上次社交
+    busy_until: datetime | None = None
+    interruptible: bool = True
+    current_priority: int = 0
+    last_social_at: datetime | None = None
 
 
 @dataclass
@@ -159,6 +164,11 @@ class SimulationEngine:
         # 自然事件系统：WorldObject 内存缓存 + 全局天气
         self._objects: dict[str, EngineObject] = {}
         self._weather: WeatherState = WeatherState()
+        # 阶段 19+：基础需求演化与自主社交邂逅
+        self._last_needs_evolve_at: datetime | None = None
+        self._last_encounter_scan_at: datetime | None = None
+        # 邂逅冷却：agent_id → 上次主动发起邂逅的世界时间
+        self._encounter_cooldown_until: dict[str, datetime] = {}
 
     # ------------------------------------------------------------------
     # 生命周期
@@ -248,6 +258,10 @@ class SimulationEngine:
                 fear=st.fear,
                 dirty=False,
                 is_player=(a.entity_type == "player"),
+                busy_until=st.busy_until,
+                interruptible=st.interruptible,
+                current_priority=st.current_priority,
+                last_social_at=st.last_social_at,
             )
             if eng.is_player:
                 self._player_id = a.id
@@ -371,8 +385,13 @@ class SimulationEngine:
             player.dirty = True
             await self._check_player_environment(player)
 
+        # 阶段 19+：基础需求随时间演化（驱动 LLM 主动选 socialize / have_meal / rest_at）
+        self._evolve_basic_needs(now_dt)
+
         # 4. AI Decision Tick（每个 Agent 独立按游戏分钟间隔决策）
         await self._decide_all(now_dt)
+        # 阶段 19+：周期性扫描自主社交邂逅（两个空闲 NPC 靠近 + 一方 social_need 高 → 自动 chat）
+        await self._scan_social_encounters(now_dt)
         # 反思/日结通过 daily_reflection 任务异步执行，不阻塞世界 tick
         await self._enqueue_reflect_batch(now_dt)
 
@@ -411,7 +430,194 @@ class SimulationEngine:
             current_goal=a.current_goal,
             facing=a.facing,
             updated_at=utcnow(),
+            busy_until=a.busy_until,
+            interruptible=a.interruptible,
+            current_priority=a.current_priority,
+            last_social_at=a.last_social_at,
         )
+
+    # ------------------------------------------------------------------
+    # 阶段 19+：基础需求演化 + 自主社交邂逅
+    # ------------------------------------------------------------------
+
+    def _evolve_basic_needs(self, now_dt: datetime) -> None:
+        """让 ``social_need`` / ``hunger`` / ``energy`` 按真实游戏时间增长，
+        驱动 LLM 自主选择 socialize / have_meal / rest_at。
+        """
+        settings = get_settings()
+        last = self._last_needs_evolve_at
+        if last is None:
+            self._last_needs_evolve_at = now_dt
+            return
+        elapsed_minutes = (now_dt - last).total_seconds() / 60.0
+        if elapsed_minutes <= 0:
+            return
+        self._last_needs_evolve_at = now_dt
+
+        social_dx = settings.needs_social_growth_per_minute * elapsed_minutes
+        hunger_dx = settings.needs_hunger_growth_per_minute * elapsed_minutes
+        energy_dx = settings.needs_energy_decay_per_minute * elapsed_minutes
+
+        for agent in self._agents.values():
+            if agent.is_player:
+                continue
+            if agent.entity_type != "human":
+                continue
+            if agent.state == "SLEEPING":
+                # 睡眠：恢复精力，社交/饥饿停滞
+                agent.energy = min(1.0, agent.energy + energy_dx * 4)
+                agent.dirty = True
+                continue
+            if agent.state == "EATING":
+                # 用餐：饥饿快速衰减
+                agent.hunger = max(0.0, agent.hunger - hunger_dx * 6)
+                agent.dirty = True
+                continue
+            if agent.state == "RESTING":
+                agent.energy = min(1.0, agent.energy + energy_dx * 3)
+                agent.dirty = True
+                continue
+            if agent.state == "CHATTING":
+                # 对话中：社交需求被持续满足
+                agent.social_need = max(0.0, agent.social_need - social_dx * 2)
+                agent.dirty = True
+                continue
+
+            # 默认：随时间累积需求
+            new_social = min(1.0, agent.social_need + social_dx)
+            new_hunger = min(1.0, agent.hunger + hunger_dx)
+            new_energy = max(0.0, agent.energy - energy_dx)
+            if (
+                abs(new_social - agent.social_need) > 1e-4
+                or abs(new_hunger - agent.hunger) > 1e-4
+                or abs(new_energy - agent.energy) > 1e-4
+            ):
+                agent.social_need = new_social
+                agent.hunger = new_hunger
+                agent.energy = new_energy
+                agent.dirty = True
+
+    async def _scan_social_encounters(self, now_dt: datetime) -> None:
+        """阶段 19+：自主社交邂逅扫描器。
+
+        当两个空闲 / 闲置的 NPC 在同一场景内靠得很近，且至少一方
+        ``social_need`` 已超过阈值时，由引擎层主动发起一次 ``chat``
+        请求（走完整的 InteractionService 评估 / 广播 / 派发流程）。
+
+        这弥补了 LLM async 路径下 ``socialize`` 工具滞后于 rule 兜底的问题：
+        即使 NPC 已经按日程在路上走，引擎也能在 idle 间隙触发自发对话。
+
+        防抖：``self._encounter_cooldown_until`` 记录每个 NPC 上次主动发起
+        的截止时间；同一 NPC 在冷却内不会重复主动出击。
+        """
+        settings = get_settings()
+        last = self._last_encounter_scan_at
+        scan_interval_min = max(1, settings.social_encounter_scan_minutes)
+        if last is not None and (now_dt - last).total_seconds() < scan_interval_min * 60:
+            return
+        self._last_encounter_scan_at = now_dt
+
+        threshold = settings.social_need_trigger_threshold / 100.0
+        max_dist = max(1, settings.social_encounter_distance)
+
+        # 过滤"想找人 + 现在能找"的候选
+        def _is_idle(a: EngineAgent) -> bool:
+            if a.state in {"IDLE", "WAITING"} and not a.path:
+                return True
+            return False
+
+        def _on_cooldown(a: EngineAgent) -> bool:
+            until = self._encounter_cooldown_until.get(a.id)
+            return until is not None and until > now_dt
+
+        eager: list[EngineAgent] = []
+        for a in self._agents.values():
+            if a.is_player or a.entity_type != "human":
+                continue
+            if not _is_idle(a) or _on_cooldown(a):
+                continue
+            if a.busy_until is not None and a.busy_until > now_dt:
+                continue
+            if a.social_need < threshold:
+                continue
+            eager.append(a)
+        if not eager:
+            return
+
+        # 按 social_need 高的排前
+        eager.sort(key=lambda a: a.social_need, reverse=True)
+
+        chosen_pairs: list[tuple[str, str]] = []
+        used: set[str] = set()
+        for initiator in eager:
+            if initiator.id in used:
+                continue
+            best_target: EngineAgent | None = None
+            best_dist = max_dist + 1
+            for other in self._agents.values():
+                if other.id == initiator.id or other.is_player:
+                    continue
+                if other.entity_type != "human":
+                    continue
+                if other.scene_id != initiator.scene_id:
+                    continue
+                if other.id in used:
+                    continue
+                if not _is_idle(other):
+                    continue
+                if other.busy_until is not None and other.busy_until > now_dt:
+                    continue
+                d = abs(other.x - initiator.x) + abs(other.y - initiator.y)
+                if d > max_dist:
+                    continue
+                if d < best_dist:
+                    best_dist = d
+                    best_target = other
+            if best_target is None:
+                continue
+            chosen_pairs.append((initiator.id, best_target.id))
+            used.add(initiator.id)
+            used.add(best_target.id)
+            cooldown = timedelta(minutes=settings.social_encounter_cooldown_minutes)
+            self._encounter_cooldown_until[initiator.id] = now_dt + cooldown
+            self._encounter_cooldown_until[best_target.id] = now_dt + cooldown
+
+        if not chosen_pairs:
+            return
+
+        # 异步派发，避免阻塞 tick
+        asyncio.create_task(
+            self._dispatch_social_encounters(chosen_pairs),
+            name=f"social-encounter:{self._step}",
+        )
+
+    async def _dispatch_social_encounters(
+        self, pairs: list[tuple[str, str]]
+    ) -> None:
+        """逐对调用 InteractionService.create_request（独立 session，避免阻塞主 tick）。"""
+        from app.services.interaction_service import get_interaction_service
+
+        svc = get_interaction_service()
+        for requester_id, target_id in pairs:
+            try:
+                async with self._session_factory() as session:
+                    await svc.create_request(
+                        session,
+                        requester_id=requester_id,
+                        target_id=target_id,
+                        kind="chat",
+                        reason="（自然邂逅）",
+                        requester_priority=2,
+                        simulation_id=self._sim_id(),
+                    )
+                    await session.commit()
+            except Exception:
+                logger.debug(
+                    "social encounter dispatch failed for %s -> %s",
+                    requester_id,
+                    target_id,
+                    exc_info=True,
+                )
 
     # ------------------------------------------------------------------
     # AI 决策
@@ -459,8 +665,41 @@ class SimulationEngine:
                     agent.dirty = True
                 else:
                     continue
+            if agent.state == "BUSY_REFUSING":
+                # 阶段 19：软拒后短暂展示台词，3 秒真实时间后自动恢复
+                import time as _time
+                since = self._chatting_since_real.get(agent.id)
+                if since is None or (_time.time() - since) > 3.0:
+                    agent.state = "IDLE"
+                    agent.current_goal = None
+                    self._chatting_since_real.pop(agent.id, None)
+                    agent.dirty = True
+                else:
+                    continue
+            if agent.state == "AWAITING_RESPONSE":
+                # 等待对方响应中，不主动决策；超时由 interaction service 处理
+                import time as _time
+                since = self._chatting_since_real.get(agent.id)
+                if since is None or (_time.time() - since) > 30.0:
+                    agent.state = "IDLE"
+                    self._chatting_since_real.pop(agent.id, None)
+                    agent.dirty = True
+                else:
+                    continue
             if agent.path:
                 continue
+            # 阶段 19：busy_until 内的 NPC 跳过决策（工作/吃饭/休息中）
+            if agent.busy_until is not None and agent.busy_until > now_dt:
+                # 状态保持，确保前端气泡能持续显示
+                continue
+            elif agent.busy_until is not None and agent.busy_until <= now_dt:
+                # 忙碌结束：清理标志，让 NPC 回到日程
+                agent.busy_until = None
+                agent.current_priority = 0
+                agent.interruptible = True
+                if agent.state in {"WORKING", "EATING", "RESTING"}:
+                    agent.state = "IDLE"
+                    agent.dirty = True
             # 每个 Agent 独立检查自身的决策冷却时间
             if (
                 agent.last_decision_at is not None
@@ -812,6 +1051,10 @@ class SimulationEngine:
                     state.current_action_id = upd.current_action_id
                     state.current_goal = upd.current_goal
                     state.facing = upd.facing
+                    state.busy_until = upd.busy_until
+                    state.interruptible = upd.interruptible
+                    state.current_priority = upd.current_priority
+                    state.last_social_at = upd.last_social_at
                     agent_entry = self._agents.get(upd.agent_id)
                     state.path = (
                         [{"x": p[0], "y": p[1]} for p in agent_entry.path]
@@ -1162,6 +1405,28 @@ class SimulationEngine:
             agent.last_decision_at = None
             agent.dirty = True
         self._chatting_since_real.pop(agent_id, None)
+
+    def mark_busy_refusing(
+        self, agent_id: str, *, line: str = "", duration_seconds: float = 3.0
+    ) -> None:
+        """阶段 19：软拒后让 NPC 短暂进入 BUSY_REFUSING 状态展示拒绝台词。
+
+        - 仅 IDLE / WAITING 状态会被覆盖；忙碌状态保持不动。
+        - 设置 ``current_goal`` 为拒绝台词，方便前端气泡读取。
+        - ``duration_seconds`` 用 _chatting_since_real 共享通道做超时（与 CHATTING 同机制）。
+        """
+        import time as _time
+
+        agent = self._agents.get(agent_id)
+        if agent is None:
+            return
+        if agent.state in {"IDLE", "WAITING"}:
+            agent.state = "BUSY_REFUSING"
+            if line:
+                agent.current_goal = line[:200]
+            agent.dirty = True
+            # 复用 _chatting_since_real 作为超时记录（_decide_all 不会决策这个状态）
+            self._chatting_since_real[agent_id] = _time.time()
 
     def find_agent_by_name(self, name: str) -> EngineAgent | None:
         for a in self._agents.values():

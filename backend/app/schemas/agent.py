@@ -63,6 +63,11 @@ class AgentRuntimeState(BaseModel):
     current_goal: str | None = None
     facing: str = "down"
     updated_at: datetime
+    # 阶段 19（社会化升级）：是否忙碌、是否可被打断、当前优先级
+    busy_until: datetime | None = None
+    interruptible: bool = True
+    current_priority: int = 0
+    last_social_at: datetime | None = None
 
 
 class Relationship(BaseModel):
@@ -146,3 +151,46 @@ class EndChatRequest(BaseModel):
     """玩家主动关闭对话，释放 NPC 的 CHATTING 状态。"""
 
     npc_id: str
+
+
+# ----- 阶段 19：交互请求 / 同意 / 拒绝协议 -----
+
+
+class InteractionRequestRecord(BaseModel):
+    """InteractionRequest 持久化记录的 Pydantic 视图。"""
+
+    id: str
+    requester_id: str
+    target_id: str
+    kind: Literal["chat", "help", "trade"]
+    status: Literal["pending", "accepted", "declined", "expired", "cancelled"]
+    reason: str | None = None
+    decline_kind: Literal["soft", "hard"] | None = None
+    npc_line: str | None = None
+    requester_priority: int = 3
+    target_priority_at_request: int = 0
+    created_at: datetime
+    resolved_at: datetime | None = None
+    expires_at: datetime | None = None
+
+    class Config:
+        from_attributes = True
+
+
+class PlayerInteractionRequestCreate(BaseModel):
+    """玩家发起 NPC 交互请求。"""
+
+    target_entity_id: str
+    kind: Literal["chat", "help", "trade"] = "chat"
+    reason: str | None = None
+
+
+class PlayerInteractionRequestResponse(BaseModel):
+    """请求发起的同步结果：要么直接接受可立即对话，要么返回拒绝原因。"""
+
+    request_id: str
+    status: Literal["accepted", "declined"]
+    decline_kind: Literal["soft", "hard"] | None = None
+    npc_line: str | None = None
+    reason: str | None = None
+    target_state: str | None = None

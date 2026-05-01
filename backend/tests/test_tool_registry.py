@@ -15,7 +15,6 @@ def test_tools_registered():
         "move_to_entity",
         "interact_with_object",
         "avoid_danger",
-        "talk_to_entity",
         "face_entity",
         "write_memory",
         "search_memory",
@@ -23,8 +22,19 @@ def test_tools_registered():
         "make_sound",
         "update_emotion",
         "wait",
+        # 阶段 19：社交 + 生活类工具
+        "request_interaction",
+        "socialize",
+        "end_chat",
+        "work_at_location",
+        "have_meal",
+        "rest_at",
+        "browse_shop",
+        "observe_environment",
     }
     assert expected.issubset(names)
+    # 阶段 19：旧的 talk_to_entity 已被 request_interaction 替代
+    assert "talk_to_entity" not in names
 
 
 def test_entity_filtering():
@@ -37,9 +47,11 @@ def test_entity_filtering():
     # 动物专属
     assert "react_to_pet" in animal
     assert "react_to_pet" not in human
-    # 人类专属
-    assert "talk_to_entity" in human
-    assert "talk_to_entity" not in animal
+    # 人类专属（社交 + 生活）
+    assert "request_interaction" in human
+    assert "request_interaction" not in animal
+    assert "socialize" in human
+    assert "work_at_location" in human
 
 
 def test_openai_functions_shape():
@@ -55,4 +67,4 @@ def test_openai_functions_shape():
 def test_prompt_catalog_human_readable():
     catalog = get_tool_registry().prompt_catalog("human")
     assert "move_to_location" in catalog
-    assert "talk_to_entity" in catalog
+    assert "request_interaction" in catalog

@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { obsApi } from "../../api";
+import { api, obsApi } from "../../api";
 import { observabilitySocket } from "../../api/websocket";
 import type {
   DashboardPayload,
@@ -9,7 +9,7 @@ import type {
   TaskRecord,
   ToolCallRecord,
 } from "../../types/observability";
-import type { WorldEvent } from "../../types/domain";
+import type { AgentProfile, WorldEvent } from "../../types/domain";
 import { CopyableTruncatedId, copyObservabilityText } from "./CopyableTruncatedId";
 import { TraceDetail } from "./TraceDetail";
 import { AgentRuntimeCard } from "./AgentRuntimeCard";
@@ -245,6 +245,24 @@ function WorldEventsView() {
           e.description,
           String(e.importance),
         ])}
+        renderDetail={(i) => {
+          const e = events[i];
+          return (
+            <DetailPanel>
+              <DRow label="event_id" value={e.id} mono />
+              <DRow label="event_type" value={e.event_type} mono />
+              <DRow label="simulation_id" value={e.simulation_id} mono />
+              <DRow label="actor_entity_id" value={e.actor_entity_id} mono />
+              <DRow label="target_entity_id" value={e.target_entity_id} mono />
+              <DRow label="scene_id" value={e.scene_id} mono />
+              <DRow label="location_id" value={e.location_id} mono />
+              <DRow label="importance" value={String(e.importance)} />
+              <DRow label="source" value={e.source} mono />
+              <DRow label="description" value={e.description} />
+              <JsonBlock label="payload" data={e.payload} />
+            </DetailPanel>
+          );
+        }}
       />
     </div>
   );
@@ -307,6 +325,22 @@ function ObservabilityEventsView() {
             "-"
           ),
         ])}
+        renderDetail={(i) => {
+          const e = events[i];
+          return (
+            <DetailPanel>
+              <DRow label="event_id" value={e.id} mono />
+              <DRow label="trace_id" value={e.trace_id ? <CopyableTruncatedId id={e.trace_id} full /> : null} />
+              <DRow label="span_id" value={e.span_id} mono />
+              <DRow label="entity_id" value={e.entity_id} mono />
+              <DRow label="task_id" value={e.task_id} mono />
+              <DRow label="player_id" value={e.player_id} mono />
+              <DRow label="duration_ms" value={e.duration_ms != null ? `${e.duration_ms} ms` : null} />
+              <DRow label="world_step" value={e.world_step != null ? String(e.world_step) : null} />
+              <JsonBlock label="payload" data={e.payload} />
+            </DetailPanel>
+          );
+        }}
       />
     </div>
   );
@@ -317,18 +351,92 @@ function ObservabilityEventsView() {
 // -----------------------------------------------------------------------------
 
 function AgentRuntimeView() {
-  const [agentId, setAgentId] = useState("");
+  const [agents, setAgents] = useState<AgentProfile[]>([]);
+  const [query, setQuery] = useState("");
+  const [selectedId, setSelectedId] = useState<string | null>(null);
+
+  useEffect(() => {
+    api.listAgents().then(setAgents).catch(() => {});
+  }, []);
+
+  const filtered = useMemo(() => {
+    const q = query.trim().toLowerCase();
+    if (!q) return agents;
+    return agents.filter(
+      (a) =>
+        a.name.toLowerCase().includes(q) ||
+        a.id.toLowerCase().includes(q) ||
+        (a.occupation ?? "").toLowerCase().includes(q) ||
+        a.entity_type.toLowerCase().includes(q),
+    );
+  }, [agents, query]);
+
+  const selected = agents.find((a) => a.id === selectedId) ?? null;
+
   return (
-    <div>
-      <Toolbar>
-        <TextFilter
-          label="agent_id"
-          value={agentId}
-          onChange={setAgentId}
-          placeholder="例如 npc_xiaofang"
+    <div style={{ display: "flex", gap: 12, height: "calc(100vh - 130px)" }}>
+      {/* 左侧 Agent 列表 */}
+      <div style={{ width: 240, flexShrink: 0, display: "flex", flexDirection: "column", gap: 8 }}>
+        <input
+          style={{
+            background: "#0c1118",
+            border: "1px solid rgba(255,255,255,0.1)",
+            borderRadius: 4,
+            color: "#e6edf3",
+            padding: "6px 8px",
+            fontSize: 12,
+            fontFamily: "monospace",
+            outline: "none",
+          }}
+          placeholder="按名字 / ID / 职业搜索…"
+          value={query}
+          onChange={(e) => setQuery(e.target.value)}
         />
-      </Toolbar>
-      {agentId ? <AgentRuntimeCard agentId={agentId} /> : <EmptyMsg text="输入 agent_id 查看运行态" />}
+        <div style={{ overflowY: "auto", display: "flex", flexDirection: "column", gap: 2 }}>
+          {filtered.length === 0 && (
+            <div style={{ fontSize: 12, opacity: 0.5, padding: "6px 0" }}>
+              {agents.length === 0 ? "加载中……" : "无匹配"}
+            </div>
+          )}
+          {filtered.map((a) => {
+            const active = a.id === selectedId;
+            return (
+              <button
+                key={a.id}
+                type="button"
+                onClick={() => setSelectedId(a.id)}
+                style={{
+                  background: active ? "#1f3050" : "transparent",
+                  border: active ? "1px solid rgba(121,192,255,0.3)" : "1px solid transparent",
+                  borderRadius: 4,
+                  color: active ? "#e6edf3" : "#c0caf5",
+                  cursor: "pointer",
+                  padding: "6px 8px",
+                  textAlign: "left",
+                  display: "flex",
+                  flexDirection: "column",
+                  gap: 2,
+                }}
+              >
+                <div style={{ fontSize: 13, fontWeight: active ? 600 : 400 }}>{a.name}</div>
+                <div style={{ fontSize: 10, color: "#8b949e", fontFamily: "monospace" }}>
+                  {a.id}
+                  {a.occupation ? ` · ${a.occupation}` : ""}
+                </div>
+              </button>
+            );
+          })}
+        </div>
+      </div>
+
+      {/* 右侧运行态详情 */}
+      <div style={{ flex: 1, overflowY: "auto" }}>
+        {selected ? (
+          <AgentRuntimeCard agentId={selected.id} />
+        ) : (
+          <EmptyMsg text="← 从左侧选择一个 Agent 查看运行态" />
+        )}
+      </div>
     </div>
   );
 }
@@ -417,6 +525,40 @@ function LLMCallsView() {
           r.error_code ?? "-",
           r.trace_id ? <CopyableTruncatedId id={r.trace_id} previewChars={12} /> : "-",
         ])}
+        renderDetail={(i) => {
+          const r = rows[i];
+          return (
+            <DetailPanel>
+              <DRow label="record_id" value={r.id} mono />
+              <DRow label="agent_id" value={r.agent_id} mono />
+              <DRow label="provider" value={r.provider} mono />
+              <DRow label="model" value={r.model} mono />
+              <DRow label="prompt_template" value={r.prompt_template_id ?? null} mono />
+              <DRow label="prompt_version" value={r.prompt_version ?? null} mono />
+              <DRow label="latency_ms" value={`${r.latency_ms} ms`} />
+              <DRow label="token_estimate" value={r.token_estimate != null ? String(r.token_estimate) : null} />
+              <DRow label="retry_count" value={String(r.retry_count)} />
+              <DRow label="success" value={boolBadge(r.success)} />
+              <DRow label="schema_valid" value={r.schema_valid != null ? boolBadge(r.schema_valid) : null} />
+              <DRow label="fallback_used" value={boolBadge(r.fallback_used, true)} />
+              {r.error_code && <DRow label="error_code" value={r.error_code} mono color="#ff7a59" />}
+              <DRow label="trace_id" value={r.trace_id ? <CopyableTruncatedId id={r.trace_id} full /> : null} />
+              {r.input_summary && (
+                <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+                  <span style={{ color: "#8b949e", fontSize: 12 }}>input_summary</span>
+                  <pre style={{
+                    margin: 0, padding: "8px 10px", background: "#060a10",
+                    border: "1px solid rgba(255,255,255,0.08)", borderRadius: 4,
+                    fontSize: 11, fontFamily: "monospace", color: "#c0caf5",
+                    whiteSpace: "pre-wrap", wordBreak: "break-all", maxHeight: 300, overflowY: "auto",
+                  }}>
+                    {r.input_summary}
+                  </pre>
+                </div>
+              )}
+            </DetailPanel>
+          );
+        }}
       />
     </div>
   );
@@ -448,6 +590,27 @@ function ToolCallsView() {
           r.error_code ?? "-",
           r.trace_id ? <CopyableTruncatedId id={r.trace_id} previewChars={12} /> : "-",
         ])}
+        renderDetail={(i) => {
+          const r = rows[i];
+          return (
+            <DetailPanel>
+              <DRow label="record_id" value={r.id} mono />
+              <DRow label="tool" value={r.tool} mono />
+              <DRow label="caller_agent_id" value={r.caller_agent_id} mono />
+              <DRow label="entity_type" value={r.entity_type} mono />
+              <DRow label="source" value={r.source} mono />
+              <DRow label="duration_ms" value={`${r.duration_ms} ms`} />
+              <DRow label="success" value={boolBadge(r.success)} />
+              <DRow label="schema_valid" value={r.schema_valid != null ? boolBadge(r.schema_valid) : null} />
+              <DRow label="permission_valid" value={r.permission_valid != null ? boolBadge(r.permission_valid) : null} />
+              <DRow label="world_state_valid" value={r.world_state_valid != null ? boolBadge(r.world_state_valid) : null} />
+              {r.error_code && <DRow label="error_code" value={r.error_code} mono color="#ff7a59" />}
+              {r.result_summary && <DRow label="result_summary" value={r.result_summary} />}
+              <DRow label="trace_id" value={r.trace_id ? <CopyableTruncatedId id={r.trace_id} full /> : null} />
+              <JsonBlock label="arguments" data={r.arguments} />
+            </DetailPanel>
+          );
+        }}
       />
     </div>
   );
@@ -504,6 +667,50 @@ function TasksView() {
           <span key="k" style={{ fontSize: 11, color: "#8b949e" }}>{r.idempotency_key}</span>,
           r.trace_id ? <CopyableTruncatedId id={r.trace_id} previewChars={12} /> : "-",
         ])}
+        renderDetail={(i) => {
+          const r = rows[i];
+          const waitedSecs = r.enqueued_at && r.started_at
+            ? ((new Date(r.started_at).getTime() - new Date(r.enqueued_at).getTime()) / 1000).toFixed(1)
+            : null;
+          const durationSecs = r.started_at && r.finished_at
+            ? ((new Date(r.finished_at).getTime() - new Date(r.started_at).getTime()) / 1000).toFixed(1)
+            : null;
+          return (
+            <DetailPanel>
+              <DRow label="task_id" value={r.id} mono />
+              <DRow label="task_type" value={r.task_type} mono />
+              <DRow label="status" value={statusBadge(r.status)} />
+              <DRow label="entity_id" value={r.entity_id} mono />
+              <DRow label="simulation_id" value={r.simulation_id} mono />
+              <DRow label="simulation_step" value={r.simulation_step != null ? String(r.simulation_step) : null} />
+              <DRow label="priority" value={String(r.priority)} />
+              <DRow label="retry" value={`${r.retry_count} / ${r.max_retries}`} />
+              <DRow label="enqueued_at" value={r.enqueued_at ? new Date(r.enqueued_at).toLocaleString() : null} />
+              {waitedSecs && <DRow label="queue_wait" value={`${waitedSecs} s`} />}
+              {r.started_at && <DRow label="started_at" value={new Date(r.started_at).toLocaleString()} />}
+              {durationSecs && <DRow label="exec_duration" value={`${durationSecs} s`} />}
+              {r.finished_at && <DRow label="finished_at" value={new Date(r.finished_at).toLocaleString()} />}
+              <DRow label="idempotency_key" value={r.idempotency_key} mono />
+              <DRow label="trace_id" value={r.trace_id ? <CopyableTruncatedId id={r.trace_id} full /> : null} />
+              <DRow label="parent_trace_id" value={r.parent_trace_id ? <CopyableTruncatedId id={r.parent_trace_id} full /> : null} />
+              {r.last_error && (
+                <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+                  <span style={{ color: "#ff7a59", fontSize: 12 }}>last_error</span>
+                  <pre style={{
+                    margin: 0, padding: "8px 10px", background: "rgba(255,122,89,0.06)",
+                    border: "1px solid rgba(255,122,89,0.2)", borderRadius: 4,
+                    fontSize: 11, fontFamily: "monospace", color: "#ff7a59",
+                    whiteSpace: "pre-wrap", wordBreak: "break-all",
+                  }}>
+                    {r.last_error}
+                  </pre>
+                </div>
+              )}
+              <JsonBlock label="payload" data={r.payload} />
+              <JsonBlock label="result" data={r.result} />
+            </DetailPanel>
+          );
+        }}
       />
     </div>
   );
@@ -552,6 +759,55 @@ function ErrorsView() {
           r.entity_id ?? "-",
           r.trace_id ? <CopyableTruncatedId id={r.trace_id} previewChars={12} /> : "-",
         ])}
+        renderDetail={(i) => {
+          const e = rows[i];
+          // 从 payload 提取常见错误字段
+          const p = e.payload ?? {};
+          const errorMsg = (p.message ?? p.error ?? p.error_message) as string | undefined;
+          const errorCode = (p.error_code ?? p.code) as string | undefined;
+          const stackTrace = (p.stack_trace ?? p.traceback ?? p.stack) as string | undefined;
+          return (
+            <DetailPanel>
+              <DRow label="event_id" value={e.id} mono />
+              <DRow label="event_type" value={e.event_type} mono />
+              <DRow label="level" value={levelBadge(e.level)} />
+              <DRow label="entity_id" value={e.entity_id} mono />
+              <DRow label="task_id" value={e.task_id} mono />
+              <DRow label="player_id" value={e.player_id} mono />
+              <DRow label="trace_id" value={e.trace_id ? <CopyableTruncatedId id={e.trace_id} full /> : null} />
+              <DRow label="span_id" value={e.span_id} mono />
+              <DRow label="world_step" value={e.world_step != null ? String(e.world_step) : null} />
+              {errorCode && <DRow label="error_code" value={errorCode} mono color="#ff7a59" />}
+              {errorMsg && (
+                <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+                  <span style={{ color: "#ff7a59", fontSize: 12 }}>error message</span>
+                  <pre style={{
+                    margin: 0, padding: "8px 10px", background: "rgba(255,122,89,0.06)",
+                    border: "1px solid rgba(255,122,89,0.2)", borderRadius: 4,
+                    fontSize: 11, fontFamily: "monospace", color: "#ff9a7a",
+                    whiteSpace: "pre-wrap", wordBreak: "break-all", maxHeight: 200, overflowY: "auto",
+                  }}>
+                    {errorMsg}
+                  </pre>
+                </div>
+              )}
+              {stackTrace && (
+                <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+                  <span style={{ color: "#8b949e", fontSize: 12 }}>stack trace</span>
+                  <pre style={{
+                    margin: 0, padding: "8px 10px", background: "#060a10",
+                    border: "1px solid rgba(255,255,255,0.08)", borderRadius: 4,
+                    fontSize: 10, fontFamily: "monospace", color: "#8b949e",
+                    whiteSpace: "pre-wrap", wordBreak: "break-all", maxHeight: 300, overflowY: "auto",
+                  }}>
+                    {stackTrace}
+                  </pre>
+                </div>
+              )}
+              <JsonBlock label="完整 payload" data={p} />
+            </DetailPanel>
+          );
+        }}
       />
     </div>
   );
@@ -702,15 +958,21 @@ function TextFilter({
 function Table({
   columns,
   rows,
+  renderDetail,
 }: {
   columns: string[];
   rows: Array<Array<React.ReactNode>>;
+  renderDetail?: (i: number) => React.ReactNode | null;
 }) {
+  const [expandedRow, setExpandedRow] = useState<number | null>(null);
+  const colSpan = columns.length + (renderDetail ? 1 : 0);
+
   return (
     <div style={{ overflow: "auto", maxHeight: "calc(100vh - 240px)" }}>
       <table style={styles.table}>
         <thead>
           <tr>
+            {renderDetail && <th style={{ ...styles.th, width: 24, padding: "6px 4px" }} />}
             {columns.map((c) => (
               <th key={c} style={styles.th}>
                 {c}
@@ -721,23 +983,122 @@ function Table({
         <tbody>
           {rows.length === 0 ? (
             <tr>
-              <td colSpan={columns.length} style={{ ...styles.td, textAlign: "center", opacity: 0.7 }}>
+              <td colSpan={colSpan} style={{ ...styles.td, textAlign: "center", opacity: 0.7 }}>
                 暂无数据
               </td>
             </tr>
           ) : (
-            rows.map((row, i) => (
-              <tr key={i} style={{ background: i % 2 ? "#0e1420" : "transparent" }}>
-                {row.map((cell, j) => (
-                  <td key={j} style={styles.td}>
-                    {cell}
-                  </td>
-                ))}
-              </tr>
-            ))
+            rows.map((row, i) => {
+              const isExpanded = expandedRow === i;
+              const detail = renderDetail ? renderDetail(i) : null;
+              const expandable = detail !== null && detail !== undefined;
+              return (
+                <>
+                  <tr
+                    key={`row-${i}`}
+                    style={{
+                      background: isExpanded ? "rgba(121,192,255,0.06)" : i % 2 ? "#0e1420" : "transparent",
+                      cursor: expandable ? "pointer" : "default",
+                    }}
+                    onClick={() => expandable && setExpandedRow(isExpanded ? null : i)}
+                  >
+                    {renderDetail && (
+                      <td style={{ ...styles.td, padding: "5px 4px", width: 24, textAlign: "center", color: "#8b949e", fontSize: 10 }}>
+                        {expandable ? (isExpanded ? "▼" : "▶") : ""}
+                      </td>
+                    )}
+                    {row.map((cell, j) => (
+                      <td key={j} style={styles.td}>
+                        {cell}
+                      </td>
+                    ))}
+                  </tr>
+                  {isExpanded && expandable && (
+                    <tr key={`detail-${i}`} style={{ background: "#0a0f18" }}>
+                      <td colSpan={colSpan} style={{ padding: "0 0 0 28px", borderBottom: "1px solid rgba(255,255,255,0.08)" }}>
+                        {detail}
+                      </td>
+                    </tr>
+                  )}
+                </>
+              );
+            })
           )}
         </tbody>
       </table>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// DetailPanel — 展开行详情的统一布局
+// ---------------------------------------------------------------------------
+
+function DetailPanel({ children }: { children: React.ReactNode }) {
+  return (
+    <div style={{ padding: "10px 12px 14px 4px", display: "flex", flexDirection: "column", gap: 8 }}>
+      {children}
+    </div>
+  );
+}
+
+function DRow({ label, value, mono = false, color }: { label: string; value: React.ReactNode; mono?: boolean; color?: string }) {
+  return (
+    <div style={{ display: "flex", gap: 8, alignItems: "flex-start", fontSize: 12 }}>
+      <span style={{ color: "#8b949e", minWidth: 130, flexShrink: 0 }}>{label}</span>
+      <span style={{ color: color ?? "#e6edf3", fontFamily: mono ? "monospace" : undefined, wordBreak: "break-all" }}>
+        {value ?? <span style={{ opacity: 0.4 }}>—</span>}
+      </span>
+    </div>
+  );
+}
+
+function JsonBlock({ label, data }: { label: string; data: unknown }) {
+  const [collapsed, setCollapsed] = useState(true);
+  if (data === null || data === undefined) return null;
+  const empty = typeof data === "object" && Object.keys(data as object).length === 0;
+  if (empty) return null;
+  const text = JSON.stringify(data, null, 2);
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+      <button
+        type="button"
+        onClick={(e) => { e.stopPropagation(); setCollapsed((c) => !c); }}
+        style={{
+          background: "none",
+          border: "none",
+          color: "#8b949e",
+          fontSize: 12,
+          cursor: "pointer",
+          textAlign: "left",
+          padding: 0,
+          display: "flex",
+          alignItems: "center",
+          gap: 4,
+        }}
+      >
+        <span style={{ fontSize: 10 }}>{collapsed ? "▶" : "▼"}</span>
+        <span>{label}</span>
+        {collapsed && <span style={{ color: "#4a5568", fontSize: 11 }}>({Object.keys(data as object).length} keys)</span>}
+      </button>
+      {!collapsed && (
+        <pre style={{
+          margin: 0,
+          padding: "8px 10px",
+          background: "#060a10",
+          border: "1px solid rgba(255,255,255,0.08)",
+          borderRadius: 4,
+          fontSize: 11,
+          fontFamily: "monospace",
+          color: "#a8d8a8",
+          whiteSpace: "pre-wrap",
+          wordBreak: "break-all",
+          maxHeight: 400,
+          overflowY: "auto",
+        }}>
+          {text}
+        </pre>
+      )}
     </div>
   );
 }

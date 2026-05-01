@@ -64,6 +64,8 @@ from app.schemas.agent import (
     EndChatRequest,
     PlayerInteractRequest,
     PlayerInteractResponse,
+    PlayerInteractionRequestCreate,
+    PlayerInteractionRequestResponse,
     PlayerMoveRequest,
     PlayerMoveResponse,
     PlayerTalkRequest,
@@ -291,6 +293,92 @@ class PlayerService:
         engine = get_simulation_runtime().engine
         engine.end_chatting(request.npc_id)
         return {"ok": True}
+
+    # ------------------------------------------------------------------
+    # 阶段 19：交互请求 / 同意 / 拒绝协议
+    # ------------------------------------------------------------------
+
+    async def request_interaction(
+        self,
+        session: AsyncSession,
+        request: PlayerInteractionRequestCreate,
+    ) -> PlayerInteractionRequestResponse:
+        """玩家发起 NPC 交互请求并同步评估。
+
+        - 校验距离 / 玩家存在性 / 限流 / 内容安全。
+        - 评估接受 → 自动 ``start_chatting``，前端可继续走 ``POST /talk``。
+        - 评估拒绝 → 返回 decline_kind + npc_line + reason。
+        """
+        from app.services.interaction_service import get_interaction_service
+
+        engine = get_simulation_runtime().engine
+        player_eng = engine._current_player()  # type: ignore[attr-defined]
+        if player_eng is None:
+            raise TargetNotFound("player not exists")
+
+        target = await session.get(Agent, request.target_entity_id)
+        if target is None or target.entity_type == "player":
+            raise TargetNotFound("target agent not found")
+        target_state = await session.get(AgentState, target.id)
+        if target_state is None or target_state.scene_id != player_eng.scene_id:
+            raise OutOfRange("target in another scene")
+        if (
+            abs(target_state.x - player_eng.x)
+            + abs(target_state.y - player_eng.y)
+            > INTERACTION_RADIUS + 1
+        ):
+            raise OutOfRange("too far to talk")
+
+        # 限流
+        settings = get_settings()
+        rl = await check_player_limit(
+            player_eng.id,
+            "interact",
+            limit=settings.security_player_rate_limit,
+            window_seconds=settings.security_rate_window_seconds,
+        )
+        if not rl.allowed:
+            raise PlayerRateLimited(
+                f"操作过于频繁，请 {rl.retry_after:.1f}s 后再试",
+                details={"retry_after_seconds": rl.retry_after},
+            )
+
+        sim = engine.get_simulation()
+        sim_id = sim.id if sim is not None else None
+        record, evt = await get_interaction_service().create_request(
+            session,
+            requester_id=player_eng.id,
+            target_id=target.id,
+            kind=request.kind,
+            reason=request.reason,
+            requester_priority=4,
+            simulation_id=sim_id,
+        )
+        await session.commit()
+        return PlayerInteractionRequestResponse(
+            request_id=record.id,
+            status="accepted" if evt.decision == "accept" else "declined",
+            decline_kind=record.decline_kind,
+            npc_line=record.npc_line,
+            reason=record.reason,
+            target_state=target_state.state,
+        )
+
+    async def cancel_interaction_request(
+        self, session: AsyncSession, request_id: str
+    ) -> dict:
+        from app.services.interaction_service import get_interaction_service
+
+        engine = get_simulation_runtime().engine
+        player_eng = engine._current_player()  # type: ignore[attr-defined]
+        requester_id = player_eng.id if player_eng is not None else None
+        record = await get_interaction_service().cancel_request(
+            session, request_id=request_id, requester_id=requester_id
+        )
+        await session.commit()
+        if record is None:
+            return {"ok": False, "reason": "not_found"}
+        return {"ok": True, "status": record.status}
 
     # ------------------------------------------------------------------
     # 交互
@@ -647,7 +735,42 @@ class PlayerService:
         if abs(state.x - player_eng.x) + abs(state.y - player_eng.y) > INTERACTION_RADIUS + 1:
             raise OutOfRange("too far to talk")
 
-        # 令 NPC 进入 CHATTING 状态：停止移动，专注对话
+        # 阶段 19：仅当目标已进入 CHATTING（前一步 request_interaction 已被接受）时
+        # 才放行直接对话。否则要求前端先发起请求-评估流程。
+        # 容错：若 NPC 当前不是 CHATTING（前端旧版本直接调 talk），自动补一次评估。
+        if state.state != "CHATTING":
+            from app.services.interaction_service import get_interaction_service
+
+            sim_for_request = engine.get_simulation()
+            _, evt = await get_interaction_service().create_request(
+                session,
+                requester_id=player_eng.id,
+                target_id=target.id,
+                kind="chat",
+                reason=request.text[:120],
+                requester_priority=4,
+                simulation_id=sim_for_request.id if sim_for_request else None,
+            )
+            if evt.decision != "accept":
+                # 拒绝：直接返回 NPC 拒绝台词作为 reply，不进入完整对话管线
+                refusal = evt.npc_line or (
+                    "对方现在没有回应你。"
+                    if evt.decision == "hard_decline"
+                    else "对方不太方便。"
+                )
+                await session.commit()
+                return PlayerTalkResponse(
+                    conversation_id=f"conv:{player_eng.id}:{target.id}",
+                    reply=refusal,
+                    emotion="neutral",
+                    memory_ids=[],
+                    citations=[],
+                )
+            # 接受：刷新 target_state
+            state = await session.get(AgentState, target.id)
+            assert state is not None
+
+        # 令 NPC 进入 CHATTING 状态（评估器已设置；此处幂等保险）
         engine.start_chatting(target.id)
 
         # 阶段 18：限流 + 内容检查
@@ -924,6 +1047,19 @@ class PlayerService:
             affection_delta=aff,
             fear_delta=fear,
         )
+        # 阶段 19+：标记 NPC 的 last_social_at + 衰减 social_need
+        try:
+            target_eng = engine.get_agent(target.id)
+            if target_eng is not None:
+                target_eng.last_social_at = now
+                decay = float(settings.needs_social_decay_after_chat)
+                if decay > 0:
+                    target_eng.social_need = max(
+                        0.0, target_eng.social_need * (1.0 - decay)
+                    )
+                target_eng.dirty = True
+        except Exception:
+            logger.debug("post-talk social_need decay failed", exc_info=True)
         await session.commit()
 
         # 关系摘要阈值：累计 delta 超 threshold 时投递 relationship_update 任务

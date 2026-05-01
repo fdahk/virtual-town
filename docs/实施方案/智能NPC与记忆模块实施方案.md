@@ -215,15 +215,6 @@ executor.execute_batch()
     }
   },
   {
-    "name": "talk_to_entity",
-    "description": "与人类、动物或玩家互动",
-    "parameters": {
-      "target_entity_id": "string",
-      "topic": "string",
-      "tone": "friendly | neutral | angry | shy"
-    }
-  },
-  {
     "name": "interact_with_object",
     "description": "与世界物品互动",
     "parameters": {
@@ -237,6 +228,75 @@ executor.execute_batch()
     "parameters": {
       "duration_minutes": "integer",
       "reason": "string"
+    }
+  },
+  {
+    "name": "request_interaction",
+    "description": "（阶段 19）发起 chat / help / trade 请求，需对方接受",
+    "parameters": {
+      "target_entity_id": "string",
+      "kind": "chat | help | trade",
+      "reason": "string",
+      "priority": "integer (0..10)"
+    }
+  },
+  {
+    "name": "socialize",
+    "description": "（阶段 19）基于好感度自动找熟人发起 chat",
+    "parameters": {
+      "topic": "string",
+      "only_friends": "boolean",
+      "max_distance": "integer"
+    }
+  },
+  {
+    "name": "end_chat",
+    "description": "（阶段 19）主动结束当前对话",
+    "parameters": {
+      "reason": "string",
+      "target_entity_id": "string?"
+    }
+  },
+  {
+    "name": "work_at_location",
+    "description": "（阶段 19）专注工作 / 学习 / 营业，期间不接受打扰",
+    "parameters": {
+      "location_id": "string",
+      "duration_minutes": "integer",
+      "activity": "string"
+    }
+  },
+  {
+    "name": "have_meal",
+    "description": "（阶段 19）吃饭，降低饥饿、改善心情",
+    "parameters": {
+      "food_object_id": "string?",
+      "duration_minutes": "integer"
+    }
+  },
+  {
+    "name": "rest_at",
+    "description": "（阶段 19）休息恢复精力",
+    "parameters": {
+      "location_id": "string?",
+      "duration_minutes": "integer",
+      "reason": "string"
+    }
+  },
+  {
+    "name": "browse_shop",
+    "description": "（阶段 19）在商铺 / 集市闲逛",
+    "parameters": {
+      "location_id": "string",
+      "interest": "string"
+    }
+  },
+  {
+    "name": "observe_environment",
+    "description": "（阶段 19）写一条带情绪的小记忆",
+    "parameters": {
+      "description": "string",
+      "emotion": "string"
     }
   }
 ]
@@ -324,3 +384,162 @@ executor.execute_batch()
 5. 一天结束（游戏内 22:30 后）能生成 Daily Summary，并处理短期记忆遗忘。
 6. 玩家和 NPC 的互动会影响关系和后续行为。
 7. 反思可通过 `POST /api/agents/{id}/reflect` 手动触发，产出 thought 必须 `evidence_memory_ids` 引用至少 2 条已有事件 / 对话记忆。
+8.（阶段 19）NPC 头顶根据状态显示富气泡：CHATTING💬 / WORKING💼 / EATING🍴 / RESTING☕ / SLEEPING💤 / AWAITING_RESPONSE❓ / BUSY_REFUSING❌。
+9.（阶段 19）玩家点击 NPC 进入 ChatPanel 时先发送请求评估，对方接受才能输入；软拒显示自然台词；硬拒显示原因。
+10.（阶段 19）NPC-NPC 自主对话由请求-接受协议触发，双方轮流由 LLM 驱动，最多 10 轮，旁观者前端能看到台词气泡。
+
+---
+
+## 9. 交互请求协议（阶段 19）
+
+### 9.1 状态机
+
+```
+IDLE ─request_interaction→ AWAITING_RESPONSE ─accepted→ CHATTING
+                          ├─soft_declined→ BUSY_REFUSING(3s) → IDLE
+                          └─hard_declined→ IDLE
+CHATTING ─end_chat / 10 turns→ IDLE
+WORKING / EATING / RESTING ─busy_until 到期→ IDLE
+```
+
+### 9.2 分级拒绝策略
+
+| 触发条件 | 决策 |
+|----------|------|
+| 目标 SLEEPING / current_priority ≥ 8 / interruptible=False | hard_decline |
+| 陌生人（familiarity < 0.2）+ 目标忙碌 | hard_decline |
+| 熟人 + 目标忙碌 | soft_decline（LLM 生成台词，规则兜底） |
+| 玩家发起 + fear > 0.6 | soft_decline |
+| 其他 | accept |
+
+### 9.3 数据模型
+
+`InteractionRequest`：
+```
+id, requester_id, target_id, kind('chat'|'help'|'trade'),
+status('pending'|'accepted'|'declined'|'expired'|'cancelled'),
+reason, decline_kind('soft'|'hard'|null), npc_line,
+requester_priority, target_priority_at_request,
+created_at, resolved_at, expires_at
+```
+
+`AgentState` 新增字段：`busy_until / interruptible / current_priority / last_social_at`。
+
+### 9.4 接口
+
+- `POST /api/players/me/interaction-requests`：玩家发起请求，同步返回 accepted / declined。
+- `POST /api/players/me/interaction-requests/{id}/cancel`：取消 pending。
+- WebSocket 事件：`interaction.request_pending` / `interaction.accepted` / `interaction.declined` / `interaction.cancelled`。
+
+### 9.5 NPC-NPC 自主对话循环
+
+- 触发：双方 entity_type=human，且 `request_interaction(kind=chat)` 评估为 accept。
+- 派发：`InteractionService` `asyncio.create_task` 启动 `npc_dialogue_loop.run_npc_dialogue`。
+- 双方轮流调 LLM 生成台词，prompt 含双方人物档案 + 关系摘要 + 上一轮台词。
+- 任一方 LLM 返回 `end_chat=true` 或满 10 轮强制结束，硬超时 60 秒。
+- 每轮台词广播 `dialogue.npc_to_npc_message`，前端在说话者头顶显示气泡。
+- 结束时双方写 chat 记忆 + 应用 `RelationshipChange`。
+
+### 9.6 安全护栏
+
+- 同一 NPC 对同一对方连续 2 次硬拒后，30 仿真分钟内冷却（Redis 计数器）。
+- 接受成功后冷却清零。
+- 工具层 `request_interaction` 在冷却生效时直接返回 STATE_CONFLICT，不再投递评估。
+
+---
+
+## 10. 自主社交闭环（阶段 19+）
+
+光把"请求-接受协议"接好还不够——若没有持续的内驱动力，NPC 仍然只会按 schedule 走。
+本节把"想找人 → 出手 → 落库"三段闭环的所有齿轮都串起来。
+
+### 10.1 基础需求自然演化（`SimulationEngine._evolve_basic_needs`）
+
+每个 world tick 根据流逝的仿真分钟数累加：
+
+```
+social_need += needs_social_growth_per_minute  · Δt   (默认 0.0010 / 分钟)
+hunger      += needs_hunger_growth_per_minute  · Δt   (默认 0.0008 / 分钟)
+energy      -= needs_energy_decay_per_minute   · Δt   (默认 0.0005 / 分钟)
+```
+
+| 当前状态 | 行为 |
+|---------|------|
+| `SLEEPING` | energy 加速回升；社交/饥饿停滞 |
+| `EATING` | hunger 快速衰减 |
+| `RESTING` | energy 回升 |
+| `CHATTING` | social_need 快速衰减（社交需求被持续满足） |
+| 其他 | 默认按上面公式累积 |
+
+完成一次对话（NPC-NPC dialogue_loop / 玩家 talk）时，对应方的 `social_need *= (1 - needs_social_decay_after_chat)`，
+默认衰减 55%——保留余量让连续社交不会瞬间清零。
+
+> 这是 LLM 主动选择 `socialize` / `have_meal` / `rest_at` 的**唯一驱动信号**，
+> 没有它，prompt 里的"社交需求"永远停在默认 0.3，阈值 0.55 永远达不到。
+
+### 10.2 引擎层"自主社交邂逅"扫描器（`_scan_social_encounters`）
+
+LLM async 路径有先天滞后：rule_agent 已经为 NPC 设了 path，等 worker 反应过来时
+`agent.path` 非空就被冷却跳过了。引擎层的扫描器作为"安全网"补上这块：
+
+**触发条件（每 `social_encounter_scan_minutes` 仿真分钟扫描一次，默认 5）**：
+
+1. 候选 A：`entity_type==human`、`state ∈ {IDLE, WAITING}`、`path` 为空、
+   `busy_until` 已到期，**且 `social_need ≥ threshold`**。
+2. 候选 B：同场景内、同样空闲、与 A 曼哈顿距离 ≤ `social_encounter_distance`（默认 3）。
+3. A、B 任一在 `social_encounter_cooldown_minutes`（默认 20 仿真分钟）冷却内则跳过。
+
+匹配成功 → `asyncio.create_task` 调用 `InteractionService.create_request(kind="chat")`，
+走完整的评估 / 广播 / 派发流程；接受 → 触发 `npc_dialogue_loop`。
+
+这保证了**即使没有 LLM**，闲下来的两个空闲 NPC 也会自然撞见聊天。
+
+### 10.3 工具产出的记忆候选必须落库（`agent_decision._consume_memory_candidates`）
+
+`request_interaction` / `socialize` / `interact` 等工具在 `ToolResult.memory_candidates`
+里附了候选记忆，但旧版本 `decide_with_llm` 只消费 LLM 自己的 `plan.memory_writes`，
+工具候选**完全没人写库**——这是"NPC 记忆里看不到对话"的核心原因之一。
+
+修复后流程：
+
+```
+执行工具 → ToolResult{success, result, memory_candidates: [...]}
+        ↓
+decide_with_llm 把每个候选用 importance.compute_importance 重新打分后
+                 调 MemoryService.write 写入 short_term，关键词原样保留。
+```
+
+### 10.4 socialize 工具默认放宽
+
+| 场景 | 旧行为 | 新行为 |
+|------|--------|--------|
+| 附近有熟人 | 选熟人 | 选熟人 |
+| 只有陌生人 | `TARGET_NOT_FOUND` 直接失败 | 自动降级到陌生人池，按距离选最近的 |
+| `only_friends=true` | 严格只熟人 | 严格只熟人（保留逃生通道） |
+
+避免新场景或 seed 关系不全时 NPC 永远孤独。
+
+### 10.5 配置项一览
+
+| 变量 | 默认 | 说明 |
+|------|-----:|------|
+| `SOCIAL_NEED_TRIGGER_THRESHOLD` | 55 | LLM prompt 中"高于阈值，可考虑发起社交"的阈值（×100 标度） |
+| `NEEDS_SOCIAL_GROWTH_PER_MINUTE` | 0.0010 | social_need 每仿真分钟增量 |
+| `NEEDS_HUNGER_GROWTH_PER_MINUTE` | 0.0008 | hunger 每仿真分钟增量 |
+| `NEEDS_ENERGY_DECAY_PER_MINUTE` | 0.0005 | energy 每仿真分钟衰减 |
+| `NEEDS_SOCIAL_DECAY_AFTER_CHAT` | 0.55 | 单次社交完成后 social_need 衰减比例 |
+| `SOCIAL_ENCOUNTER_SCAN_MINUTES` | 5 | 引擎邂逅扫描间隔（仿真分钟） |
+| `SOCIAL_ENCOUNTER_DISTANCE` | 3 | 邂逅最大曼哈顿距离 |
+| `SOCIAL_ENCOUNTER_COOLDOWN_MINUTES` | 20 | 同一 NPC 邂逅触发后冷却（仿真分钟） |
+| `NPC_DIALOG_MAX_TURNS` | 10 | NPC-NPC 对话最大轮次 |
+| `INTERACTION_HIGH_PRIORITY_THRESHOLD` | 8 | 目标当前任务紧迫度 ≥ 此值 → 硬拒 |
+
+### 10.6 验收（手动观察 / 日志）
+
+启动一段时间后应能在前端 / 数据库观察到：
+
+1. NPC 头顶气泡偶发闪现 ❓（AWAITING_RESPONSE）→ 💬（CHATTING）→ 自然结束。
+2. `interaction_requests` 表出现 `status=accepted` 的行，且 `reason` 含"自然邂逅"或工具理由。
+3. `dialogue_messages` 表出现 `meta.source=npc_dialogue_loop` 的对话行。
+4. `memories` 表中 `memory_type=chat` 且 `keywords` 含 "socialize" / 对方 name 的记录持续增长。
+5. WS 流中 `interaction.*` / `dialogue.npc_to_npc_message` / `dialogue.npc_to_npc_ended` 事件按节奏出现。

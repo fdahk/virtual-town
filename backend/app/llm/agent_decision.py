@@ -97,6 +97,8 @@ async def decide_with_llm(
     registry = get_tool_registry()
     tool_catalog = registry.prompt_catalog(entity_type=agent.entity_type)
 
+    social_block = await _social_block(session, agent, state, world_time)
+
     prompt, meta = render_prompt(
         "agent_decision",
         {
@@ -105,6 +107,7 @@ async def decide_with_llm(
             "perception_block": perception["text"],
             "plan_block": _plan_block(plan_ctx),
             "memory_block": _memory_block(memories),
+            "social_block": social_block,
             "tool_catalog": tool_catalog,
         },
     )
@@ -152,15 +155,53 @@ async def decide_with_llm(
     ]
     results = await executor.execute_batch(ctx, calls)
 
-    # 写 LLM 自己提议的 memory_writes（带 importance 五因素明细）
     ms = get_memory_service()
     from app.domain.planning import ImportanceContext, compute_importance
 
+    # 阶段 19+：消费工具产生的 memory_candidates（之前 request_interaction /
+    # socialize / interact 等工具的候选记忆都没人写库，导致 NPC 找不到社交记忆）
+    _MEM_TYPES = {"event", "thought", "chat", "summary"}
+    for r in results:
+        for cand in (r.memory_candidates or [])[:3]:
+            try:
+                mtype = cand.get("memory_type", "thought")
+                if mtype not in _MEM_TYPES:
+                    mtype = "thought"
+                desc = str(cand.get("description") or "").strip()
+                if not desc:
+                    continue
+                imp_hint = int(cand.get("importance", 3) or 3)
+                calc = compute_importance(
+                    ImportanceContext(
+                        memory_type=mtype,
+                        emotion=plan.emotion,
+                        is_first_person=True,
+                        extras={"source": f"tool:{r.tool}"},
+                    )
+                )
+                kw = cand.get("keywords") or []
+                if not isinstance(kw, list):
+                    kw = []
+                await ms.write(
+                    session,
+                    agent_id=agent_id,
+                    memory_type=mtype,
+                    scope=cand.get("scope") or "short_term",
+                    description=desc[:400],
+                    importance=max(calc.importance, max(1, min(imp_hint, 10))),
+                    importance_detail=calc.detail,
+                    keywords=[str(k)[:64] for k in kw][:8],
+                    commit=False,
+                )
+            except Exception:
+                logger.debug("tool memory_candidate write failed", exc_info=True)
+
+    # 写 LLM 自己提议的 memory_writes（带 importance 五因素明细）
     for mw in plan.memory_writes[:4]:
         try:
             base_type = (
                 mw.memory_type
-                if mw.memory_type in {"event", "thought", "chat", "summary"}
+                if mw.memory_type in _MEM_TYPES
                 else "thought"
             )
             calc = compute_importance(
@@ -184,14 +225,20 @@ async def decide_with_llm(
         except Exception:
             logger.exception("memory write from LLM failed")
 
-    # 把情绪也同步到引擎
+    # 把情绪也同步到引擎（worker 进程中引擎可能未起，容错）
     if plan.emotion:
-        from app.services.simulation_runtime import get_simulation_runtime
+        try:
+            from app.services.simulation_runtime import get_simulation_runtime
 
-        engine_agent = get_simulation_runtime().engine.get_agent(agent_id)
-        if engine_agent is not None:
-            engine_agent.emotion = plan.emotion
-            engine_agent.dirty = True
+            engine_agent = get_simulation_runtime().engine.get_agent(agent_id)
+            if engine_agent is not None:
+                engine_agent.emotion = plan.emotion
+                engine_agent.dirty = True
+        except RuntimeError:
+            # worker 进程或测试环境中没有起仿真引擎；情绪通过下次 tick 重新加载
+            logger.debug("engine not started; skip emotion sync for %s", agent_id)
+        except Exception:
+            logger.debug("emotion sync failed", exc_info=True)
 
     return results
 
@@ -395,6 +442,91 @@ def _memory_block(memories: list[dict[str, Any]]) -> str:
         f"- [{m['id'][:8]} imp={m['importance']}] {m['description']}"
         for m in memories
     )
+
+
+async def _social_block(
+    session: AsyncSession,
+    agent: Agent,
+    state: AgentState,
+    world_time: datetime,
+) -> str:
+    """阶段 19：社交动机块。
+
+    暴露给 LLM：
+    - 当前社交需求（social_need 0..1）和阈值。
+    - 距离上次社交多久（仿真分钟）。
+    - 同场景附近熟人（familiarity 排前 3）。
+
+    用于驱动 ``socialize`` / ``request_interaction`` 的调用决策。
+    """
+    from sqlalchemy import select
+
+    from app.core.config import get_settings
+    from app.db.models import Relationship
+
+    settings = get_settings()
+    threshold = settings.social_need_trigger_threshold / 100.0
+    need = float(state.social_need or 0.0)
+    last_social_at = getattr(state, "last_social_at", None)
+
+    minutes_since = None
+    if last_social_at is not None:
+        try:
+            minutes_since = int((world_time - last_social_at).total_seconds() / 60)
+        except Exception:
+            minutes_since = None
+
+    # 同场景附近熟人 top-3
+    rels_rows = (
+        await session.execute(
+            select(Relationship).where(
+                Relationship.from_agent_id == agent.id,
+                Relationship.familiarity > 0.2,
+            )
+        )
+    ).scalars().all()
+    rel_by_target = {r.to_entity_id: r for r in rels_rows}
+
+    nearby_states = (
+        await session.execute(
+            select(AgentState).where(
+                AgentState.scene_id == state.scene_id,
+                AgentState.agent_id != agent.id,
+            )
+        )
+    ).scalars().all()
+
+    friends: list[tuple[str, str, float]] = []
+    for st in nearby_states:
+        rel = rel_by_target.get(st.agent_id)
+        if rel is None:
+            continue
+        other = await session.get(Agent, st.agent_id)
+        if other is None or other.entity_type not in {"human", "player"}:
+            continue
+        friends.append((st.agent_id, other.name, float(rel.familiarity)))
+    friends.sort(key=lambda f: f[2], reverse=True)
+    friends = friends[:3]
+
+    lines: list[str] = []
+    lines.append(
+        f"- 社交需求：{need:.2f}（阈值 {threshold:.2f}，"
+        f"{'高于阈值，可考虑发起社交' if need >= threshold else '低于阈值，不急'}）"
+    )
+    if minutes_since is not None:
+        lines.append(f"- 距离上次社交：{minutes_since} 仿真分钟")
+    else:
+        lines.append("- 还没有过社交记录")
+    if friends:
+        items = ", ".join(f"{name}({fid}, fam={fam:.2f})" for fid, name, fam in friends)
+        lines.append(f"- 附近熟人 top3：{items}")
+    else:
+        lines.append("- 附近暂无熟人")
+    lines.append(
+        "- 提示：若你想找人聊天，可调用 socialize（自动选择对象）或 "
+        "request_interaction（指定 target_entity_id）。"
+    )
+    return "\n".join(lines)
 
 
 def _plan_block(plan_ctx: dict[str, Any]) -> str:

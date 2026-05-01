@@ -13,6 +13,8 @@ from app.schemas.agent import (
     EndChatRequest,
     PlayerInteractRequest,
     PlayerInteractResponse,
+    PlayerInteractionRequestCreate,
+    PlayerInteractionRequestResponse,
     PlayerMoveRequest,
     PlayerMoveResponse,
     PlayerTalkRequest,
@@ -70,3 +72,29 @@ async def end_chat(
 ) -> dict:
     """玩家关闭对话界面时调用，释放 NPC 的 CHATTING 状态。"""
     return await get_player_service().end_chat(session, request)
+
+
+# ----- 阶段 19：交互请求 / 同意 / 拒绝协议 -----
+
+
+@router.post(
+    "/me/interaction-requests",
+    response_model=PlayerInteractionRequestResponse,
+)
+async def create_interaction_request(
+    request: PlayerInteractionRequestCreate,
+    session: AsyncSession = Depends(get_session),
+) -> PlayerInteractionRequestResponse:
+    """玩家发起 NPC 交互请求；返回同步评估结果（accept / decline）。"""
+    return await get_player_service().request_interaction(session, request)
+
+
+@router.post(
+    "/me/interaction-requests/{request_id}/cancel",
+    response_model=dict,
+)
+async def cancel_interaction_request(
+    request_id: str, session: AsyncSession = Depends(get_session)
+) -> dict:
+    """玩家取消尚未处理完的交互请求。"""
+    return await get_player_service().cancel_interaction_request(session, request_id)

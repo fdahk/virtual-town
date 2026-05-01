@@ -7,6 +7,7 @@ import type {
   MapTile,
   Memory,
   MemorySearchResult,
+  PlayerInteractionRequestResponse,
   PlayerTalkResponse,
   Portal,
   Relationship,
@@ -98,6 +99,22 @@ export const api = {
   /** 玩家关闭对话界面，释放 NPC CHATTING 状态 */
   endChat: (body: { npc_id: string }) =>
     apiPost<{ ok: boolean }>("/api/players/me/end_chat", body),
+  /** 阶段 19：发起 NPC 交互请求（chat / help / trade），返回同步评估结果 */
+  requestInteraction: (body: {
+    target_entity_id: string;
+    kind?: "chat" | "help" | "trade";
+    reason?: string;
+  }) =>
+    apiPost<PlayerInteractionRequestResponse>(
+      "/api/players/me/interaction-requests",
+      body,
+    ),
+  /** 阶段 19：取消 pending 的交互请求 */
+  cancelInteractionRequest: (requestId: string) =>
+    apiPost<{ ok: boolean; status?: string; reason?: string }>(
+      `/api/players/me/interaction-requests/${requestId}/cancel`,
+      {},
+    ),
 
   // ---- simulation ----
   getCurrentSimulation: () => apiGet<Simulation>("/api/simulations/current"),

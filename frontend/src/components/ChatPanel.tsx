@@ -4,11 +4,13 @@ import { api } from "../api";
 import { usePortrait } from "../game/assets/usePortrait";
 
 interface ChatItem {
-  side: "me" | "npc";
+  side: "me" | "npc" | "system";
   text: string;
   emotion?: string | null;
   citations?: Array<{ description: string; score: number }>;
 }
+
+type Phase = "requesting" | "accepted" | "soft_declined" | "hard_declined";
 
 export function ChatPanel() {
   const pending = useWorldStore((s) => s.pendingDialogue);
@@ -17,25 +19,56 @@ export function ChatPanel() {
   const [input, setInput] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [phase, setPhase] = useState<Phase>("requesting");
+  const [decline, setDecline] = useState<{ kind: "soft" | "hard"; line: string | null; reason: string | null } | null>(null);
   const inputRef = useRef<HTMLInputElement>(null);
   const portrait = usePortrait(pending?.targetId ?? null);
 
   const handleClose = useCallback(() => {
-    if (pending?.targetId) {
+    if (pending?.targetId && phase === "accepted") {
       // 释放 NPC 的 CHATTING 状态，让 NPC 恢复自主行动
       api.endChat({ npc_id: pending.targetId }).catch(() => null);
     }
     setPending(null);
-  }, [pending, setPending]);
+  }, [pending, setPending, phase]);
 
+  // 阶段 19：进入面板时先发起 interaction request 评估
   useEffect(() => {
-    if (pending) {
-      setMessages([]);
-      setInput("");
-      setError(null);
-      setTimeout(() => inputRef.current?.focus(), 10);
-    }
-  }, [pending]);
+    if (!pending) return;
+    setMessages([]);
+    setInput("");
+    setError(null);
+    setDecline(null);
+    setPhase("requesting");
+    setBusy(true);
+    api
+      .requestInteraction({
+        target_entity_id: pending.targetId,
+        kind: "chat",
+        reason: "玩家点击发起对话",
+      })
+      .then((resp) => {
+        if (resp.status === "accepted") {
+          setPhase("accepted");
+          setTimeout(() => inputRef.current?.focus(), 10);
+        } else {
+          const kind = resp.decline_kind === "soft" ? "soft" : "hard";
+          setPhase(kind === "soft" ? "soft_declined" : "hard_declined");
+          setDecline({
+            kind,
+            line: resp.npc_line ?? null,
+            reason: resp.reason ?? null,
+          });
+        }
+      })
+      .catch((err) => {
+        const e = err as { code?: string; message?: string };
+        setError(e.message ?? "请求失败");
+        setPhase("hard_declined");
+        setDecline({ kind: "hard", line: null, reason: e.message ?? null });
+      })
+      .finally(() => setBusy(false));
+  }, [pending?.targetId]);
 
   // Esc 键关闭对话
   useEffect(() => {
@@ -50,7 +83,7 @@ export function ChatPanel() {
 
   const send = async () => {
     const text = input.trim();
-    if (!text || busy) return;
+    if (!text || busy || phase !== "accepted") return;
     setBusy(true);
     setError(null);
     setMessages((prev) => prev.concat({ side: "me", text }));
@@ -100,59 +133,97 @@ export function ChatPanel() {
             <div style={styles.portraitName}>{pending.targetName}</div>
           </div>
         <div style={styles.body}>
-          {messages.length === 0 && (
+          {phase === "requesting" && (
+            <div style={{ opacity: 0.7, fontSize: 13, textAlign: "center", marginTop: 60 }}>
+              <div style={{ marginBottom: 8 }}>正在询问 {pending.targetName} 是否方便…</div>
+              <div style={{ fontSize: 11, opacity: 0.55 }}>对方需要根据当前状态决定是否接受</div>
+            </div>
+          )}
+          {phase === "soft_declined" && (
+            <div style={{ marginTop: 30, padding: "12px 16px" }}>
+              <div style={{ fontSize: 13, color: "#cbd2db", marginBottom: 6 }}>
+                {pending.targetName} 暂时没空：
+              </div>
+              <div style={{ ...styles.bubble, alignSelf: "flex-start", background: "#1a222f", color: "#fff" }}>
+                {decline?.line ?? "等我忙完再聊吧。"}
+              </div>
+              <div style={{ fontSize: 11, opacity: 0.45, marginTop: 12 }}>
+                建议稍后再来。
+              </div>
+            </div>
+          )}
+          {phase === "hard_declined" && (
+            <div style={{ marginTop: 30, padding: "12px 16px" }}>
+              <div style={{ fontSize: 13, color: "#ffae8a" }}>
+                {decline?.line ?? `${pending.targetName} 现在无法回应你。`}
+              </div>
+              <div style={{ fontSize: 11, opacity: 0.5, marginTop: 8 }}>
+                {decline?.reason ?? ""}
+              </div>
+            </div>
+          )}
+          {phase === "accepted" && messages.length === 0 && (
             <div style={{ opacity: 0.55, fontSize: 13, textAlign: "center", marginTop: 40 }}>
               问问他 / 她一个问题吧，比如「小王喜欢喝什么？」
             </div>
           )}
-          {messages.map((m, i) => (
-            <div
-              key={i}
-              style={{
-                ...styles.bubble,
-                alignSelf: m.side === "me" ? "flex-end" : "flex-start",
-                background: m.side === "me" ? "#3c74ff" : "#1a222f",
-                color: "#fff",
-              }}
-            >
-              <div>{m.text}</div>
-              {m.emotion && (
-                <div style={{ fontSize: 10, marginTop: 4, opacity: 0.7 }}>
-                  情绪：{m.emotion}
-                </div>
-              )}
-              {m.citations && m.citations.length > 0 && (
-                <div style={{ fontSize: 10, marginTop: 6, opacity: 0.65 }}>
-                  引用记忆：
-                  <ul style={{ margin: "4px 0", paddingLeft: 14 }}>
-                    {m.citations.map((c, j) => (
-                      <li key={j}>
-                        {c.description}（{c.score.toFixed(2)}）
-                      </li>
-                    ))}
-                  </ul>
-                </div>
-              )}
-            </div>
-          ))}
+          {phase === "accepted" &&
+            messages.map((m, i) => (
+              <div
+                key={i}
+                style={{
+                  ...styles.bubble,
+                  alignSelf: m.side === "me" ? "flex-end" : "flex-start",
+                  background: m.side === "me" ? "#3c74ff" : "#1a222f",
+                  color: "#fff",
+                }}
+              >
+                <div>{m.text}</div>
+                {m.emotion && (
+                  <div style={{ fontSize: 10, marginTop: 4, opacity: 0.7 }}>
+                    情绪：{m.emotion}
+                  </div>
+                )}
+                {m.citations && m.citations.length > 0 && (
+                  <div style={{ fontSize: 10, marginTop: 6, opacity: 0.65 }}>
+                    引用记忆：
+                    <ul style={{ margin: "4px 0", paddingLeft: 14 }}>
+                      {m.citations.map((c, j) => (
+                        <li key={j}>
+                          {c.description}（{c.score.toFixed(2)}）
+                        </li>
+                      ))}
+                    </ul>
+                  </div>
+                )}
+              </div>
+            ))}
         </div>
         </div>
         {error && <div style={styles.error}>{error}</div>}
-        <div style={styles.inputRow}>
-          <input
-            ref={inputRef}
-            style={styles.input}
-            value={input}
-            onChange={(e) => setInput(e.target.value)}
-            onKeyDown={(e) => e.key === "Enter" && send()}
-            placeholder="输入你想说的话（Enter 发送）"
-            maxLength={300}
-            disabled={busy}
-          />
-          <button style={styles.send} onClick={send} disabled={busy || !input.trim()}>
-            {busy ? "对方思考中" : "发送"}
-          </button>
-        </div>
+        {phase === "accepted" ? (
+          <div style={styles.inputRow}>
+            <input
+              ref={inputRef}
+              style={styles.input}
+              value={input}
+              onChange={(e) => setInput(e.target.value)}
+              onKeyDown={(e) => e.key === "Enter" && send()}
+              placeholder="输入你想说的话（Enter 发送）"
+              maxLength={300}
+              disabled={busy}
+            />
+            <button style={styles.send} onClick={send} disabled={busy || !input.trim()}>
+              {busy ? "对方思考中" : "发送"}
+            </button>
+          </div>
+        ) : (
+          <div style={styles.inputRow}>
+            <button style={{ ...styles.send, marginLeft: "auto" }} onClick={handleClose}>
+              {phase === "requesting" ? "取消请求" : "关闭"}
+            </button>
+          </div>
+        )}
       </div>
     </div>
   );

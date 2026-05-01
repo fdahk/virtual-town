@@ -180,7 +180,16 @@ class Agent(Base, TimestampMixin):
 
 
 class AgentState(Base, TimestampMixin):
-    """运行态。固定为 1:1 关系，避免重复查询 agents 主表。"""
+    """运行态。固定为 1:1 关系，避免重复查询 agents 主表。
+
+    阶段 19（社会化升级）新增字段：
+
+    - ``busy_until``：当前活动占用结束时间，决策器与请求评估器据此判断"忙碌"。
+    - ``interruptible``：是否允许被打断（睡眠/紧急任务为 False）。
+    - ``current_priority``：当前任务优先级 0-10，请求评估器对比 incoming 请求紧迫度。
+    - ``last_social_at``：上一次完成社交（对话/被请求接受）的游戏时间，
+      用于社交动机评估（社交需求满足度）。
+    """
 
     __tablename__ = "agent_states"
 
@@ -202,6 +211,11 @@ class AgentState(Base, TimestampMixin):
     path: Mapped[list[dict[str, int]]] = mapped_column(JSONB, nullable=False, default=list)
     facing: Mapped[str] = mapped_column(String(8), nullable=False, default="down")
     last_decision_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # 阶段 19：社会化升级
+    busy_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    interruptible: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    current_priority: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    last_social_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
     agent: Mapped[Agent] = relationship(back_populates="state")
 
@@ -220,6 +234,41 @@ class Relationship(Base, TimestampMixin):
     affection: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
     fear: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
     summary: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+
+class InteractionRequest(Base):
+    """阶段 19：交互请求 / 同意 / 拒绝 协议持久化记录。
+
+    生命周期：``pending → accepted | declined | expired | cancelled``。
+    decline_kind 区分软拒（短台词后释放）和硬拒（直接拒绝，需要等关系/状态变化）。
+    """
+
+    __tablename__ = "interaction_requests"
+    __table_args__ = (
+        Index("ix_interaction_requests_target_status", "target_id", "status"),
+        Index("ix_interaction_requests_requester_created", "requester_id", "created_at"),
+    )
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True, default=_uuid)
+    simulation_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    requester_id: Mapped[str] = mapped_column(
+        ForeignKey("agents.id", ondelete="CASCADE"), nullable=False
+    )
+    target_id: Mapped[str] = mapped_column(
+        ForeignKey("agents.id", ondelete="CASCADE"), nullable=False
+    )
+    kind: Mapped[str] = mapped_column(String(16), nullable=False, default="chat")
+    status: Mapped[str] = mapped_column(String(16), nullable=False, default="pending")
+    reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    decline_kind: Mapped[str | None] = mapped_column(String(8), nullable=True)
+    npc_line: Mapped[str | None] = mapped_column(Text, nullable=True)
+    requester_priority: Mapped[int] = mapped_column(Integer, nullable=False, default=3)
+    target_priority_at_request: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False
+    )
+    resolved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
 
 # ---------------------------------------------------------------------------
@@ -552,6 +601,7 @@ __all__ = [
     "AgentAction",
     "AgentState",
     "DialogueMessage",
+    "InteractionRequest",
     "LLMCallRecord",
     "Location",
     "MapScene",

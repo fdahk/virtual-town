@@ -469,8 +469,12 @@ class PlanningService:
                     "perception_block": "- (本接口不提供实时感知，保持 tool_hint 保守)",
                     "tool_catalog": (
                         "- move_to_location\n"
-                        "- talk_to_entity\n"
+                        "- request_interaction\n"
+                        "- socialize\n"
                         "- interact_with_object\n"
+                        "- work_at_location\n"
+                        "- have_meal\n"
+                        "- rest_at\n"
                         "- wait\n"
                         "- face_entity"
                     ),

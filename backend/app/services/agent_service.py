@@ -57,6 +57,10 @@ def runtime_from_orm(state: AgentState) -> AgentRuntimeState:
         current_goal=state.current_goal,
         facing=state.facing,
         updated_at=state.updated_at,
+        busy_until=getattr(state, "busy_until", None),
+        interruptible=getattr(state, "interruptible", True),
+        current_priority=getattr(state, "current_priority", 0),
+        last_social_at=getattr(state, "last_social_at", None),
     )
 
 

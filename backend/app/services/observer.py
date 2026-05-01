@@ -301,6 +301,7 @@ class Observer:
         to_status: str,
         retry_count: int = 0,
         message: str | None = None,
+        error_code: str | None = None,
     ) -> None:
         snap = current_trace()
         now = utcnow()
@@ -310,6 +311,7 @@ class Observer:
             "to_status": to_status,
             "retry_count": retry_count,
             "message": (message or "")[:1000] or None,
+            "error_code": error_code,
             "trace_id": snap.trace_id,
             "created_at": now,
         }
@@ -326,6 +328,7 @@ class Observer:
                     "retry_count": retry_count,
                     "updated_at": now.isoformat(),
                     "message": record["message"],
+                    "error_code": error_code,
                 },
                 ttl_seconds=3600,
             )
@@ -342,6 +345,7 @@ class Observer:
                 "to_status": to_status,
                 "retry_count": retry_count,
                 "message": record["message"],
+                "error_code": error_code,
             },
             task_id=task_id,
         )

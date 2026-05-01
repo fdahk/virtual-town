@@ -6,6 +6,7 @@ import {
   resolveHumanSprite,
   type LoadedManifests,
 } from "../assets/manifest";
+import { BubbleManager, mapStateToBubble } from "../components/BubbleManager";
 import type {
   AgentProfile,
   AgentRuntimeState,
@@ -41,20 +42,9 @@ const FALLBACK_TERRAIN_COLORS: Record<string, number> = {
   wall: 0x4a3f35,
 };
 
-const STATE_EMOJI: Record<string, string> = {
-  MOVING: "",
-  INTERACTING: "💡",
-  CHATTING: "💬",
-  SLEEPING: "💤",
-  DROWNING: "🆘",
-  BLOCKED: "🚧",
-  PANIC: "⚠️",
-};
-
 interface AgentNode {
   sprite: Phaser.GameObjects.Sprite | Phaser.GameObjects.Rectangle;
   label: Phaser.GameObjects.Text;
-  emoji: Phaser.GameObjects.Text;
   animKind: "human" | "cat" | "dog" | "rect";
   colorKey?: string; // 动物颜色
   lastFacing: string;
@@ -75,6 +65,9 @@ export class TownScene extends Phaser.Scene {
   private locationLayer!: Phaser.GameObjects.Container;
   private debugLayer!: Phaser.GameObjects.Container;
   private agentLayer!: Phaser.GameObjects.Container;
+  /** 阶段 19：富气泡层（位于 agentLayer 之上） */
+  private bubbleLayer!: Phaser.GameObjects.Container;
+  private bubbles!: BubbleManager;
   /** 自然事件视觉效果层（绘制在 agentLayer 之上） */
   private effectLayer!: Phaser.GameObjects.Container;
   /** 天气叠加层（覆盖整个视窗的半透明色彩） */
@@ -192,6 +185,9 @@ export class TownScene extends Phaser.Scene {
     this.objectLayer = this.add.container(0, 0);
     this.debugLayer = this.add.container(0, 0);
     this.agentLayer = this.add.container(0, 0);
+    this.bubbleLayer = this.add.container(0, 0);
+    this.bubbleLayer.setDepth(900);
+    this.bubbles = new BubbleManager(this, this.bubbleLayer);
     this.effectLayer = this.add.container(0, 0);
     // 全屏天气叠加层（默认完全透明）
     this.weatherOverlay = this.add.rectangle(0, 0, 4096, 4096, 0x000000, 0).setOrigin(0, 0);
@@ -798,20 +794,11 @@ export class TownScene extends Phaser.Scene {
       padding: { left: 3, right: 3 },
     });
     label.setOrigin(0.5, 1);
-    // emoji 底部与标签底部同高，向右偏移，令其出现在名签右侧而非覆盖头部
-    const emoji = this.add.text(
-      px + DISPLAY_TILE / 2 - 3,
-      py - LABEL_ABOVE,
-      STATE_EMOJI[rt.state] ?? "",
-      { fontSize: "12px" },
-    );
-    emoji.setOrigin(0, 1);
 
-    this.agentLayer.add([sprite as Phaser.GameObjects.GameObject, label, emoji]);
+    this.agentLayer.add([sprite as Phaser.GameObjects.GameObject, label]);
     const node: AgentNode = {
       sprite,
       label,
-      emoji,
       animKind,
       colorKey,
       lastFacing: rt.facing || "down",
@@ -819,6 +806,14 @@ export class TownScene extends Phaser.Scene {
     };
     this.playAgentAnim(profile.id, node, rt.state, rt.facing || "down");
     this.agentNodes.set(profile.id, node);
+
+    // 阶段 19：初始化气泡（贴在名签上方一点）
+    const bubbleY = py - LABEL_ABOVE - 6;
+    this.bubbles.ensure(profile.id, px, bubbleY);
+    const variant = mapStateToBubble(rt.state);
+    if (variant) {
+      this.bubbles.show(profile.id, variant);
+    }
   }
 
   private placeholderRect(x: number, y: number, profile: AgentProfile): Phaser.GameObjects.Rectangle {
@@ -869,9 +864,9 @@ export class TownScene extends Phaser.Scene {
       if (node) {
         node.sprite.destroy();
         node.label.destroy();
-        node.emoji.destroy();
         this.agentNodes.delete(payload.agentId);
       }
+      this.bubbles?.destroyAgent(payload.agentId);
       if (dataset.playerId === payload.agentId) {
         this.switchScene(payload.sceneId, payload.agentId);
       }
@@ -925,18 +920,23 @@ export class TownScene extends Phaser.Scene {
       duration: 260,
       ease: "Sine.easeInOut",
     });
-    this.tweens.add({
-      targets: node.emoji,
-      x: targetX + DISPLAY_TILE / 2 - 3,
-      y: targetY - labelAbove2,
-      duration: 260,
-      ease: "Sine.easeInOut",
-    });
-    node.emoji.setText(STATE_EMOJI[payload.state] ?? "");
+    // 阶段 19：气泡跟随移动 + 状态映射
+    this.bubbles?.tweenTo(payload.agentId, targetX, targetY - labelAbove2 - 6, 260);
+    const variant = mapStateToBubble(payload.state);
+    if (variant) {
+      this.bubbles?.show(payload.agentId, variant);
+    } else {
+      this.bubbles?.fadeOut(payload.agentId);
+    }
     const facing = payload.facing || node.lastFacing;
     this.playAgentAnim(payload.agentId, node, payload.state, facing);
     node.lastFacing = facing;
     node.lastMoving = payload.state === "MOVING";
+  }
+
+  /** 阶段 19：在指定 agent 头顶显示一段台词气泡（用于 NPC-NPC 对话）。 */
+  showSpeechBubble(agentId: string, text: string): void {
+    this.bubbles?.showSpeech(agentId, text);
   }
 
   // ---------------------------------------------------------------------

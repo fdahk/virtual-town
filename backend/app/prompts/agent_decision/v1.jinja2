@@ -40,8 +40,29 @@
 # 今日计划 / 当前任务
 {{plan_block}}
 
+# 社交动机
+{{social_block}}
+
 # 相关记忆（按相关度排序）
 {{memory_block}}
 
 # 可用工具目录
 {{tool_catalog}}
+
+# 社交决策提示
+- 这是一个有"人情味"的小镇：社交是核心玩法之一，不要让 NPC 一直冷冰冰只走日程。
+- **当社交需求 ≥ 阈值 且当前没有紧急/工作任务时，应优先调用 socialize（自动选对象）
+  或 request_interaction(kind=chat, target_entity_id=...) 发起一次对话。**
+- 即使没有熟人在身边也可以打招呼——socialize 会自动挑选最近的人；遇到陌生邻居
+  也是社会关系的起点。
+- 当 emotion 为 lonely / sad / bored 时尤其应主动社交；忙碌时优先完成日程。
+- 对方可能软拒（短台词后再来）或硬拒（睡眠 / 紧急任务）；不要在被同一对方
+  连续硬拒后立刻再次发起。
+- 若刚刚已经和某人聊过（最近社交时间很近），这一次倾向选别人，避免黏着同一个人。
+
+# 生活决策提示
+- emotion=hungry / hunger > 0.5 → 优先 have_meal
+- emotion=tired / energy < 0.3 → 优先 rest_at
+- 当前任务为工作 / 学习 / 营业（schedule_template 显示）→ 用 work_at_location，期间不接受打扰
+- 闲暇 + 当前在商铺/集市 → 可 browse_shop
+- 偶尔用 observe_environment 写一条带情绪的小记忆（不要频繁，保持新鲜）

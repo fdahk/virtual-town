@@ -494,6 +494,87 @@ export function TownPage() {
             created_at: new Date().toISOString(),
           } as WorldEvent,
         ]);
+      } else if (type === "dialogue.npc_to_npc_message") {
+        // 阶段 19：NPC-NPC 自主对话台词，气泡显示在说话者头顶
+        const msg = payload as {
+          speaker_id: string;
+          target_id: string;
+          speaker_name: string;
+          text: string;
+          emotion?: string | null;
+          turn_index: number;
+        };
+        sceneRef.current?.showSpeechBubble(msg.speaker_id, msg.text);
+        store.pushEvents([
+          {
+            id: `npc-dlg-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+            simulation_id: store.simulation?.id ?? "",
+            event_type: "dialogue.npc_to_npc_message",
+            source: "npc_dialogue",
+            actor_entity_id: msg.speaker_id,
+            target_entity_id: msg.target_id,
+            location_id: null,
+            scene_id: null,
+            description: `${msg.speaker_name}：${msg.text}`,
+            importance: 2,
+            payload: msg as unknown as Record<string, unknown>,
+            created_at: new Date().toISOString(),
+          } as WorldEvent,
+        ]);
+      } else if (type === "dialogue.npc_to_npc_ended") {
+        const p = payload as {
+          initiator_id: string;
+          target_id: string;
+          turns: number;
+          ended_by: string;
+        };
+        store.pushEvents([
+          {
+            id: `npc-dlg-end-${Date.now()}`,
+            simulation_id: store.simulation?.id ?? "",
+            event_type: "dialogue.npc_to_npc_ended",
+            source: "npc_dialogue",
+            actor_entity_id: p.initiator_id,
+            target_entity_id: p.target_id,
+            location_id: null,
+            scene_id: null,
+            description: `对话结束（${p.turns} 轮，${p.ended_by}）`,
+            importance: 1,
+            payload: p as unknown as Record<string, unknown>,
+            created_at: new Date().toISOString(),
+          } as WorldEvent,
+        ]);
+      } else if (
+        type === "interaction.request_pending" ||
+        type === "interaction.accepted" ||
+        type === "interaction.declined" ||
+        type === "interaction.cancelled"
+      ) {
+        // 阶段 19：交互请求事件 → 推送到事件流；ChatPanel 通过 store 监听处理
+        const p = payload as {
+          request_id: string;
+          requester_id: string;
+          target_id: string;
+          status: string;
+          decline_kind?: string | null;
+          npc_line?: string | null;
+        };
+        store.pushEvents([
+          {
+            id: `intr-${type}-${Date.now()}`,
+            simulation_id: store.simulation?.id ?? "",
+            event_type: type,
+            source: "interaction",
+            actor_entity_id: p.requester_id,
+            target_entity_id: p.target_id,
+            location_id: null,
+            scene_id: null,
+            description: p.npc_line ?? `${type}`,
+            importance: 1,
+            payload: p as unknown as Record<string, unknown>,
+            created_at: new Date().toISOString(),
+          } as WorldEvent,
+        ]);
       }
     });
     return () => {

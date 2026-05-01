@@ -14,7 +14,13 @@ export type AgentState =
   | "SLEEPING"
   | "BLOCKED"
   | "DROWNING"
-  | "PANIC";
+  | "PANIC"
+  // 阶段 19（社会化升级）：请求-同意-拒绝协议状态
+  | "AWAITING_RESPONSE"
+  | "BUSY_REFUSING"
+  | "WORKING"
+  | "EATING"
+  | "RESTING";
 
 export interface TilePosition {
   x: number;
@@ -131,6 +137,47 @@ export interface AgentRuntimeState {
   current_goal: string | null;
   facing: "up" | "down" | "left" | "right" | string;
   updated_at: string;
+  // 阶段 19：忙碌 / 可打断 / 优先级 / 上次社交（用于前端气泡和请求 UI）
+  busy_until?: string | null;
+  interruptible?: boolean;
+  current_priority?: number;
+  last_social_at?: string | null;
+}
+
+// ----- 阶段 19：交互请求 / 同意 / 拒绝协议 -----
+
+export type InteractionRequestKind = "chat" | "help" | "trade";
+export type InteractionRequestStatus =
+  | "pending"
+  | "accepted"
+  | "declined"
+  | "expired"
+  | "cancelled";
+export type InteractionDeclineKind = "soft" | "hard";
+
+export interface InteractionRequestRecord {
+  id: string;
+  requester_id: string;
+  target_id: string;
+  kind: InteractionRequestKind;
+  status: InteractionRequestStatus;
+  reason: string | null;
+  decline_kind: InteractionDeclineKind | null;
+  npc_line: string | null;
+  requester_priority: number;
+  target_priority_at_request: number;
+  created_at: string;
+  resolved_at: string | null;
+  expires_at: string | null;
+}
+
+export interface PlayerInteractionRequestResponse {
+  request_id: string;
+  status: "accepted" | "declined";
+  decline_kind: InteractionDeclineKind | null;
+  npc_line: string | null;
+  reason: string | null;
+  target_state: string | null;
 }
 
 export interface WorldEvent {

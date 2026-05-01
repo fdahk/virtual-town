@@ -24,9 +24,9 @@
         "perception_block": "- 附近实体：小芳(human) @ (3, 4)",
         "plan_block": "- 当前任务：去咖啡店点一杯美式咖啡",
         "memory_block": "- [mem_2 imp=4] 小王喜欢美式咖啡",
-        "tool_catalog": "- talk_to_entity\n- move_to_entity"
+        "tool_catalog": "- request_interaction\n- move_to_entity\n- interact_with_object"
       },
-      "expected_tools_any_of": ["talk_to_entity", "interact_with_object"],
+      "expected_tools_any_of": ["request_interaction", "interact_with_object"],
       "expected_schema_valid": true
     },
     {

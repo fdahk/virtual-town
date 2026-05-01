@@ -32,7 +32,6 @@ ToolExecutor 在执行前会拒绝不在授权列表里的工具调用并返回 
 | `move_to_entity`       | world     | ✅ | ✅ | ✅ | `world_tools.py` |
 | `interact_with_object` | world     | ✅ | ❌ | ✅ | `world_tools.py` |
 | `avoid_danger`         | world     | ✅ | ✅ | ✅ | `world_tools.py` |
-| `talk_to_entity`       | dialogue  | ✅ | ❌ | ✅ | `dialogue_tools.py` |
 | `face_entity`          | dialogue  | ✅ | ✅ | ✅ | `dialogue_tools.py` |
 | `write_memory`         | memory    | ✅ | ✅ | ✅ | `memory_tools.py` |
 | `search_memory`        | memory    | ✅ | ✅ | ✅ | `memory_tools.py` |
@@ -40,6 +39,18 @@ ToolExecutor 在执行前会拒绝不在授权列表里的工具调用并返回 
 | `make_sound`           | animal    | ❌ | ✅ | ❌ | `animal_tools.py` |
 | `update_emotion`       | agent     | ✅ | ✅ | ✅ | `state_tools.py` |
 | `wait`                 | simulation| ✅ | ✅ | ✅ | `state_tools.py` |
+| `request_interaction`  | dialogue  | ✅ | ❌ | ✅ | `social_tools.py`（阶段 19）|
+| `socialize`            | dialogue  | ✅ | ❌ | ❌ | `social_tools.py`（阶段 19）|
+| `end_chat`             | dialogue  | ✅ | ❌ | ✅ | `social_tools.py`（阶段 19）|
+| `work_at_location`     | life      | ✅ | ❌ | ❌ | `life_tools.py`（阶段 19）|
+| `have_meal`            | life      | ✅ | ❌ | ❌ | `life_tools.py`（阶段 19）|
+| `rest_at`              | life      | ✅ | ❌ | ❌ | `life_tools.py`（阶段 19）|
+| `browse_shop`          | life      | ✅ | ❌ | ❌ | `life_tools.py`（阶段 19）|
+| `observe_environment`  | life      | ✅ | ✅ | ❌ | `life_tools.py`（阶段 19）|
+
+> **阶段 19 变更**：`talk_to_entity` 已被 `request_interaction` 替代——后者走完整
+> 请求-评估-广播-自动派发流程，`talk_to_entity` 仅写意图记忆，功能重复。
+> 老的 `talk_to_entity` 现已从 `ToolRegistry` 中移除。
 
 ---
 
@@ -251,35 +262,10 @@ interface ToolContext {
 
 ## 5. 对话工具
 
-### 5.1 talk_to_entity
+### 5.1 ~~talk_to_entity~~ ▸ request_interaction（阶段 19 替代）
 
-用途：向某个实体说话或发起对话。
-
-参数：
-
-```json
-{
-  "target_entity_id": "npc_xiaofang",
-  "topic": "询问今天咖啡店是否营业",
-  "tone": "friendly",
-  "message": "今天咖啡店几点开门？"
-}
-```
-
-校验：
-
-1. 目标实体存在。
-2. 双方在交互半径内。
-3. 目标实体当前不是不可对话状态。
-
-结果：
-
-```json
-{
-  "conversation_id": "conv_001",
-  "message_id": "msg_001"
-}
-```
+> **变更**：`talk_to_entity` 已废弃移除；社交统一走 `request_interaction`，
+> 走完整的请求-评估-接受/拒绝-自动派发对话流程，详见 §5.3。
 
 ---
 
@@ -292,6 +278,79 @@ interface ToolContext {
 ```json
 {
   "target_entity_id": "player_001"
+}
+```
+
+---
+
+### 5.3 request_interaction（阶段 19）
+
+用途：发起一次交互请求（chat / help / trade）。对方根据当前状态、关系、紧迫度
+自动决定接受 / 软拒 / 硬拒。
+
+参数：
+
+```json
+{
+  "target_entity_id": "npc_xiaofang",
+  "kind": "chat",
+  "reason": "想聊一下昨天的事",
+  "priority": 3
+}
+```
+
+校验：
+
+1. 目标实体存在；2. 同场景且距离 ≤ 4 格；3. 不能向自己发起；
+4. 阶段 19 冷却：连续 2 次硬拒后 30 仿真分钟禁止再次向同对方发起。
+
+结果：
+
+```json
+{
+  "request_id": "uuid",
+  "status": "accepted",
+  "decision": "accept",
+  "decline_kind": null,
+  "npc_line": null,
+  "reason": "ok"
+}
+```
+
+接受 + 双方都是 NPC 时，引擎会自动派发 `npc_dialogue_loop`（§NPC-NPC 自主对话）。
+
+---
+
+### 5.4 socialize（阶段 19）
+
+用途：基于附近熟人的好感度自动选择对象发起 chat 请求；NPC 触发主动社交时使用，
+不需要手动指定 target_entity_id。
+
+参数：
+
+```json
+{
+  "topic": "想聊聊天气",
+  "only_friends": true,
+  "max_distance": 8
+}
+```
+
+返回结构与 `request_interaction` 类似，附带自动选中的 `target_entity_id`。
+
+---
+
+### 5.5 end_chat（阶段 19）
+
+用途：主动结束当前对话，释放双方 CHATTING 状态。NPC-NPC 对话循环里任一方调
+此工具会立即停止后续轮次。
+
+参数：
+
+```json
+{
+  "reason": "我得去咖啡店开门了",
+  "target_entity_id": "npc_xiaowang"
 }
 ```
 

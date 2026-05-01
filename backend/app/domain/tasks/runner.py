@@ -210,14 +210,15 @@ async def _execute_task(task_id: str) -> dict[str, Any]:
                 )
             )
             await _sess.commit()
-        await get_observer().record_task_status(
-            task_id=task.id,
-            from_status=PENDING,
-            to_status=FAILED,
-            retry_count=task.retry_count,
-            message=f"deadline exceeded after {waited_secs:.1f}s in queue",
-        )
-        return {"status": FAILED, "error": "TASK_DEADLINE_EXCEEDED"}
+    await get_observer().record_task_status(
+        task_id=task.id,
+        from_status=PENDING,
+        to_status=FAILED,
+        retry_count=task.retry_count,
+        error_code="TASK_DEADLINE_EXCEEDED",
+        message=f"deadline exceeded after {waited_secs:.1f}s in queue",
+    )
+    return {"status": FAILED, "error": "TASK_DEADLINE_EXCEEDED"}
 
     handler = registry.get(task.task_type)
     if handler is None:
@@ -427,6 +428,7 @@ async def _mark_failed(
         from_status=RUNNING,
         to_status=status,
         retry_count=retry_count,
+        error_code=error_code,
         message=message,
     )
 
