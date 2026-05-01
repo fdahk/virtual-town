@@ -1,0 +1,17 @@
+{
+  "cases": [
+    {
+      "case_name": "xiaofang_weekday",
+      "input": {
+        "profile_block": "- 名字：小芳\n- 类型：human\n- 职业：咖啡店店员\n- 性格：热情, 细心",
+        "goals_block": "- 经营好咖啡店\n- 照顾豆豆",
+        "relationships_block": "- 小王：常客，喜欢美式 (familiarity=6)",
+        "memory_block": "- imp=6 昨日咖啡机出过故障",
+        "today": "2026-04-30"
+      },
+      "expected_schema_valid": true,
+      "expected_segments_min": 4,
+      "expected_segments_max": 8
+    }
+  ]
+}

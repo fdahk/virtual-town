@@ -1,0 +1,9 @@
+{
+  "id": "daily_plan",
+  "version": "v1",
+  "expected_schema": "DailyPlanOutput",
+  "supported_models": ["qwen-plus", "qwen-max"],
+  "model_role": "reasoning",
+  "last_updated": "2026-05-01",
+  "description": "日计划：把角色长期目标 + 关系 + 昨日记忆拆为今日 4-7 段高层安排。"
+}

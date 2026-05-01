@@ -55,7 +55,9 @@ class ToolExecutor:
                 schema_valid=False,
                 permission_valid=None,
                 world_state_valid=None,
+                policy_outcome="deny_not_found",
             )
+            await self._record_violation(ctx, call, "TOOL_NOT_FOUND")
             return result
 
         permission_ok = self._check_permission(tool, ctx)
@@ -76,7 +78,9 @@ class ToolExecutor:
                 schema_valid=True,
                 permission_valid=False,
                 world_state_valid=None,
+                policy_outcome="deny_permission",
             )
+            await self._record_violation(ctx, call, "TOOL_PERMISSION_DENIED")
             return result
 
         try:
@@ -97,6 +101,7 @@ class ToolExecutor:
         duration_ms = int((time.perf_counter() - started) * 1000)
         # world_state_valid 从错误码推断（世界状态校验失败的典型错误码）
         world_state_valid: bool | None = True
+        policy_outcome: str = "allow"
         if result.error is not None:
             if result.error.code in {
                 "TARGET_NOT_FOUND",
@@ -108,11 +113,15 @@ class ToolExecutor:
                 "WORLD_BLOCKED",
             }:
                 world_state_valid = False
+                policy_outcome = "deny_world_state"
             elif result.error.code in {
                 "INVALID_ARGUMENTS",
                 "TOOL_INVALID_ARGUMENTS",
             }:
                 world_state_valid = None
+                policy_outcome = "deny_schema"
+            else:
+                policy_outcome = "error"
         await self._audit(
             call=call,
             ctx=ctx,
@@ -121,7 +130,10 @@ class ToolExecutor:
             schema_valid=True,
             permission_valid=True,
             world_state_valid=world_state_valid,
+            policy_outcome=policy_outcome,
         )
+        if result.error is not None and policy_outcome != "allow":
+            await self._record_violation(ctx, call, result.error.code)
         return result
 
     async def _audit(
@@ -134,6 +146,7 @@ class ToolExecutor:
         schema_valid: bool | None,
         permission_valid: bool | None,
         world_state_valid: bool | None,
+        policy_outcome: str | None = None,
     ) -> None:
         try:
             from app.services.observer import get_observer
@@ -155,9 +168,25 @@ class ToolExecutor:
                 caller_agent_id=ctx.agent_id,
                 entity_type=ctx.entity_type,
                 source=ctx.source,
+                policy_outcome=policy_outcome,
             )
         except Exception:
             logger.debug("observer record_tool_call failed", exc_info=True)
+
+    async def _record_violation(
+        self, ctx: ToolContext, call: ToolCall, error_code: str
+    ) -> None:
+        """把越权/失败写入 Redis 滑窗（阶段 18.2），供上层降级策略参考。"""
+        try:
+            from app.domain.safety.tool_audit import record_tool_violation
+
+            await record_tool_violation(
+                agent_id=ctx.agent_id,
+                tool=call.tool,
+                error_code=error_code,
+            )
+        except Exception:
+            logger.debug("record_tool_violation failed", exc_info=True)
 
     async def execute_batch(
         self, ctx: ToolContext, calls: list[ToolCall]

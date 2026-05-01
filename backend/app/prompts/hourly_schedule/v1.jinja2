@@ -1,0 +1,24 @@
+把下面这段 daily_plan 片段进一步拆到小时粒度（1-4 条）。
+
+严格只输出 JSON：
+{
+  "items": [
+    {
+      "hour": integer,        // 0-23
+      "activity": string,
+      "location_id": string | null,
+      "focus": string         // 这一小时最关心的事
+    }
+  ]
+}
+
+要求：
+1. hour 必须落在下方 segment 的 [start, end) 区间内。
+2. 不要跨 segment。
+3. 若 segment 时长 < 1 小时，只输出 1 条，hour 取 start 的小时。
+
+# 角色档案
+{{profile_block}}
+
+# 当前 segment
+{{segment_block}}

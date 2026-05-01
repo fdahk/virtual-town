@@ -289,7 +289,7 @@ LLM 不直接返回自然语言行动，而是选择工具。
 | `GET` | `/api/agents/{id}/relationships` | ✅ | 查询关系 |
 | `POST` | `/api/agents/{id}/memory/search` | ✅ | 记忆检索（三因素评分） |
 | `POST` | `/api/agents/{id}/reflect` | ✅ 阶段二 | 手动触发反思，返回新写入的 thought |
-| `POST` | `/api/agents/{id}/decide` | ⏸ MVP 不实现 | 手动单步决策；引擎已周期性触发，演示无需此接口 |
+| `POST` | `/api/agents/{id}/decide` | ✅ 阶段十五 | 手动单步决策（调试 / E2E）；走 `decide_with_llm` 完整管线 |
 
 ---
 

@@ -1,0 +1,8 @@
+{
+  "id": "hourly_schedule",
+  "version": "v1",
+  "expected_schema": "HourlyScheduleOutput",
+  "supported_models": ["qwen-plus"],
+  "model_role": "chat",
+  "last_updated": "2026-05-01"
+}

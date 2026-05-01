@@ -59,6 +59,11 @@ class Settings(BaseSettings):
     llm_chat_timeout_seconds: float = Field(default=30.0)
     llm_max_retries: int = Field(default=2)
     llm_enabled: bool = Field(default=False)
+    # 阶段 17：按任务角色可选不同模型（留空则回退到 chat / reasoning 默认）
+    # 支持的角色：chat / reasoning / dialogue / query_rewrite / intent / planning / embedding
+    llm_dialogue_model: str = Field(default="")
+    llm_planning_model: str = Field(default="")
+    llm_query_rewrite_model: str = Field(default="")
 
     # 仿真
     simulation_world_tick_hz: float = Field(default=5.0)
@@ -86,6 +91,20 @@ class Settings(BaseSettings):
     observability_flush_interval: float = Field(default=1.5)
     observability_batch_size: int = Field(default=200)
 
+    # 阶段 18：安全 / 内容安全
+    # 每个玩家在 security_rate_window_seconds 秒内最多发送
+    # security_player_rate_limit 条 talk / interact
+    security_player_rate_limit: int = Field(default=1)
+    security_rate_window_seconds: float = Field(default=1.0)
+    # 公共 API 每 IP 的软限流（每秒）
+    security_ip_rate_limit: int = Field(default=20)
+    security_ip_rate_window_seconds: float = Field(default=1.0)
+    # 玩家单条消息最长字符数（超出服务端直接截断并拒绝）
+    security_max_message_length: int = Field(default=500)
+    # 工具越权告警阈值（Redis 滑窗内累计 deny 次数）
+    security_tool_violation_threshold: int = Field(default=5)
+    security_tool_violation_window_seconds: float = Field(default=300.0)
+
     @field_validator("backend_cors_origins")
     @classmethod
     def _strip_cors(cls, value: str) -> str:
@@ -105,6 +124,32 @@ class Settings(BaseSettings):
     def llm_is_configured(self) -> bool:
         """是否已经具备调用外部 LLM 的最低条件。"""
         return self.llm_enabled and bool(self.llm_api_key)
+
+    def model_for_role(self, role: str) -> str:
+        """按任务角色选择模型。未配置则回退到 chat / reasoning 默认。
+
+        角色定义（阶段 17 §5）：
+        - ``chat`` / ``dialogue`` / ``query_rewrite`` / ``intent``：日常对话与短任务 → chat
+        - ``reasoning`` / ``reflection`` / ``planning`` / ``daily_plan``：长链推理 → reasoning
+        - ``embedding``：文本向量 → embedding
+        """
+        role = (role or "chat").lower()
+        if role == "embedding":
+            return self.llm_embedding_model
+        if role in {"dialogue", "chat"}:
+            return self.llm_dialogue_model or self.llm_chat_model
+        if role in {"query_rewrite", "intent"}:
+            return self.llm_query_rewrite_model or self.llm_chat_model
+        if role in {"planning", "daily_plan", "hourly_schedule", "task_decomposition"}:
+            return self.llm_planning_model or self.llm_reasoning_model
+        if role in {"reasoning", "reflection", "daily_summary"}:
+            return self.llm_reasoning_model
+        return self.llm_chat_model
+
+    @property
+    def is_prod(self) -> bool:
+        """是否生产环境（决定错误响应是否脱敏）。"""
+        return self.app_env == "prod"
 
 
 @lru_cache(maxsize=1)

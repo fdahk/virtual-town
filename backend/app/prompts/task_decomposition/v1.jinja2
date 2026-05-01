@@ -1,0 +1,33 @@
+你需要把当前小时的任务进一步拆成 2-4 个 5/10/30 分钟的子任务，让 NPC 在这一小时内按顺序推进。
+
+严格只输出 JSON：
+{
+  "tasks": [
+    {
+      "title": string,
+      "description": string,
+      "duration_minutes": integer,   // 允许值：5 / 10 / 30
+      "location_id": string | null,
+      "target_entity_id": string | null,
+      "tool_hint": string | null     // 建议先调用哪个工具（不是承诺）
+    }
+  ]
+}
+
+要求：
+1. 子任务总时长不应超过 60 分钟。
+2. 若无法合理拆解，返回单一 "wait" 任务（duration_minutes=5）。
+3. tool_hint 只能是可用工具目录中的 name。
+4. 子任务内容不能与 # 当前小时计划 矛盾。
+
+# 角色档案
+{{profile_block}}
+
+# 当前小时计划
+{{hour_block}}
+
+# 周边感知
+{{perception_block}}
+
+# 可用工具目录
+{{tool_catalog}}

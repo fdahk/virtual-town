@@ -1,0 +1,8 @@
+{
+  "id": "query_rewrite",
+  "version": "v1",
+  "expected_schema": "QueryRewriteOutput",
+  "supported_models": ["qwen-plus"],
+  "model_role": "chat",
+  "last_updated": "2026-05-01"
+}

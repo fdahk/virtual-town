@@ -111,6 +111,10 @@ docker compose up --build
 | `./scripts/seed.sh --if-empty` | 数据库为空时才初始化 |
 | `./scripts/reset_db.sh` | 销毁并重建数据库 |
 | `./scripts/backup_db.sh` | `pg_dump` + asset manifest 快照到 `./backups/` |
+| `python scripts/eval_prompts.py --mock` | Prompt 模板黄金样本自检（可加 `--strict` / 实调 LLM） |
+| `python scripts/check_asset_licenses.py` | 校验 `manifest.json` 内资源许可证字段（可加 `--strict`） |
+
+后端与观测相关的补充入口（详见 OpenAPI **`/docs`**）：`POST /api/agents/{agent_id}/decide`（单步 NPC 决策调试）、`POST /api/dialogue/*`（对话链路分段调试）。
 
 ---
 

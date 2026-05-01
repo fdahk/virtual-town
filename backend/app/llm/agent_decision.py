@@ -22,11 +22,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.logging import get_logger
 from app.db.models import Agent, AgentState, Location
+from app.domain.planning import get_planning_service
 from app.llm.client import get_llm_client
 from app.llm.tools.base import ToolCall, ToolContext, ToolResult
 from app.llm.tools.executor import get_tool_executor
 from app.llm.tools.registry import get_tool_registry
-from app.prompts import load as load_prompt
+from app.prompts import render_prompt
 from app.schemas.memory import MemorySearchRequest
 from app.services.memory_service import get_memory_service
 
@@ -76,15 +77,25 @@ async def decide_with_llm(
     perception = await _perceive(session, agent, state)
     memories = await _retrieve(session, agent_id, perception, world_time)
 
+    # 层次化规划：daily → segment → task（阶段 15.1-2）
+    plan_ctx: dict[str, Any] = {}
+    try:
+        plan_ctx = await get_planning_service().get_current_context(
+            session, agent, world_time=world_time
+        )
+    except Exception:
+        logger.debug("planning context failed", exc_info=True)
+
     registry = get_tool_registry()
     tool_catalog = registry.prompt_catalog(entity_type=agent.entity_type)
 
-    prompt = _fill_prompt(
-        load_prompt("agent_decision_v1"),
+    prompt, meta = render_prompt(
+        "agent_decision",
         {
             "profile_block": _profile_block(agent),
             "state_block": _state_block(state, world_time),
             "perception_block": perception["text"],
+            "plan_block": _plan_block(plan_ctx),
             "memory_block": _memory_block(memories),
             "tool_catalog": tool_catalog,
         },
@@ -96,8 +107,12 @@ async def decide_with_llm(
             "调用的 tool 必须来自给定目录，arguments 字段必须匹配描述。"
         ),
         user=prompt,
+        model=client.settings.model_for_role(meta.model_role or "chat"),
         temperature=0.4,
         max_tokens=700,
+        prompt_template_id=meta.id,
+        prompt_version=meta.version,
+        caller_module="agent_decision",
     )
     if data is None:
         return None
@@ -129,17 +144,33 @@ async def decide_with_llm(
     ]
     results = await executor.execute_batch(ctx, calls)
 
-    # 写 LLM 自己提议的 memory_writes
+    # 写 LLM 自己提议的 memory_writes（带 importance 五因素明细）
     ms = get_memory_service()
+    from app.domain.planning import ImportanceContext, compute_importance
+
     for mw in plan.memory_writes[:4]:
         try:
+            base_type = (
+                mw.memory_type
+                if mw.memory_type in {"event", "thought", "chat", "summary"}
+                else "thought"
+            )
+            calc = compute_importance(
+                ImportanceContext(
+                    memory_type=base_type,
+                    emotion=plan.emotion,
+                    is_first_person=True,
+                    extras={"llm_suggested": mw.importance},
+                )
+            )
             await ms.write(
                 session,
                 agent_id=agent_id,
-                memory_type=mw.memory_type if mw.memory_type in {"event", "thought", "chat", "summary"} else "thought",
+                memory_type=base_type,
                 scope="short_term",
                 description=mw.description[:400],
-                importance=max(1, min(mw.importance, 10)),
+                importance=max(calc.importance, max(1, min(mw.importance, 10))),
+                importance_detail=calc.detail,
                 commit=False,
             )
         except Exception:
@@ -270,8 +301,28 @@ def _memory_block(memories: list[dict[str, Any]]) -> str:
     )
 
 
-def _fill_prompt(template: str, values: dict[str, str]) -> str:
-    out = template
-    for k, v in values.items():
-        out = out.replace("{{" + k + "}}", v)
-    return out
+def _plan_block(plan_ctx: dict[str, Any]) -> str:
+    """层次化计划摘要块（阶段 15）。"""
+    if not plan_ctx:
+        return "- 暂无计划"
+    lines: list[str] = []
+    if plan_ctx.get("daily_summary"):
+        lines.append(f"- 今日主线：{plan_ctx['daily_summary']}")
+    seg = plan_ctx.get("segment") or {}
+    if seg:
+        lines.append(
+            f"- 当前时段：{seg.get('activity', '')} "
+            f"({seg.get('start', '?')}-{seg.get('end', '?')}) "
+            f"目标：{seg.get('goal', '')}"
+        )
+    cur = plan_ctx.get("current_task") or {}
+    if cur:
+        hint = cur.get("tool_hint")
+        hint_str = f"（建议工具：{hint}）" if hint else ""
+        lines.append(
+            f"- 当前任务：{cur.get('title', '')}{hint_str}；"
+            f"{cur.get('description', '')}"
+        )
+    if not lines:
+        return "- 暂无计划"
+    return "\n".join(lines)

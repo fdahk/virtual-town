@@ -1,0 +1,8 @@
+{
+  "id": "relationship_summary",
+  "version": "v1",
+  "expected_schema": "RelationshipSummaryOutput",
+  "supported_models": ["qwen-plus", "qwen-max"],
+  "model_role": "chat",
+  "last_updated": "2026-05-01"
+}

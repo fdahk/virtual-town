@@ -1,0 +1,38 @@
+你正在为 2D 小镇中的 NPC 起草"今天的日程"。请结合角色档案、长期目标、关系网和昨日记忆，给出一天 4-7 段高层安排。
+
+严格只输出 JSON，Schema：
+{
+  "summary": string,
+  "segments": [
+    {
+      "start": "HH:MM",
+      "end":   "HH:MM",
+      "activity": string,          // 简短短语，如 "去咖啡店上班"
+      "location_id": string | null,
+      "goal": string,              // 这一段要达成的目标
+      "priority": "high" | "normal" | "low"
+    }
+  ]
+}
+
+要求：
+1. segments 按时间顺序；首段应从早晨起床开始；最后一段应包含休息/睡觉。
+2. 段落之间时间必须连贯，末段可包含跨夜。
+3. 避免重复"去同一地点"的连续段落。
+4. goal 字段避免使用 "做XX"，使用具体动机（例："准备咖啡店开门 / 见小王 / 处理药房订单"）。
+5. 不能发明不存在的 location_id；若不确定给 null。
+
+# 角色档案
+{{profile_block}}
+
+# 长期目标
+{{goals_block}}
+
+# 主要关系
+{{relationships_block}}
+
+# 昨日记忆（按重要度排序）
+{{memory_block}}
+
+# 今天日期
+{{today}}

@@ -23,7 +23,7 @@ from app.core.logging import get_logger
 from app.core.time import utcnow
 from app.db.models import Agent, Memory
 from app.llm.client import get_llm_client
-from app.prompts import load as load_prompt
+from app.prompts import render_prompt
 from app.services.memory_service import get_memory_service
 
 logger = get_logger(__name__)
@@ -137,8 +137,8 @@ async def _generate_reflection(
     """LLM 优先，失败走规则兜底。"""
     client = get_llm_client()
     if client.settings.llm_is_configured:
-        prompt = _fill_prompt(
-            load_prompt("reflection_v1"),
+        prompt, meta = render_prompt(
+            "reflection",
             {
                 "profile_block": _profile_block(agent),
                 "memory_block": _memory_block(memories),
@@ -147,8 +147,12 @@ async def _generate_reflection(
         data = await client.chat_json(
             system="你必须只输出 JSON，reflections 数组。",
             user=prompt,
+            model=client.settings.model_for_role(meta.model_role or "reasoning"),
             temperature=0.3,
             max_tokens=500,
+            prompt_template_id=meta.id,
+            prompt_version=meta.version,
+            caller_module="memory.reflection",
         )
         if data is not None:
             try:
@@ -246,8 +250,8 @@ async def _generate_summary(
 ) -> DailySummaryOutput:
     client = get_llm_client()
     if client.settings.llm_is_configured:
-        prompt = _fill_prompt(
-            load_prompt("daily_summary_v1"),
+        prompt, meta = render_prompt(
+            "daily_summary",
             {
                 "profile_block": _profile_block(agent),
                 "memory_block": _memory_block(today_memories),
@@ -256,8 +260,12 @@ async def _generate_summary(
         data = await client.chat_json(
             system="你必须只输出 JSON。",
             user=prompt,
+            model=client.settings.model_for_role(meta.model_role or "reasoning"),
             temperature=0.3,
             max_tokens=400,
+            prompt_template_id=meta.id,
+            prompt_version=meta.version,
+            caller_module="memory.daily_summary",
         )
         if data is not None:
             try:
@@ -309,10 +317,3 @@ def _memory_block(memories: list[Memory]) -> str:
         f"- [{m.id[:8]} imp={m.importance} {m.memory_type}] {m.description}"
         for m in memories
     )
-
-
-def _fill_prompt(template: str, values: dict[str, str]) -> str:
-    out = template
-    for k, v in values.items():
-        out = out.replace("{{" + k + "}}", v)
-    return out

@@ -166,7 +166,7 @@
    - 参数 Pydantic 校验 → 权限校验 → 世界状态校验 → 业务执行 → 写事件。
 3. `agent_decision`：perceive → retrieve → plan → execute 管线。
 4. 引擎接入：LLM 优先；失败或全工具均失败时回退规则版。
-5. 版本化 prompt 模板：`agent_decision_v1.txt` 等放在 `backend/app/prompts/`。
+5. 版本化 prompt 模板：`backend/app/prompts/<prompt_id>/`（`v1.jinja2` + `metadata.json` + 可选 `examples.json`）；`render_prompt()` / OpenAPI 侧以 **prompt id**（如 `agent_decision`）标识。
 
 验收：
 

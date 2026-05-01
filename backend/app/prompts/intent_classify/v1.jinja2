@@ -1,0 +1,23 @@
+请对玩家以下文本做意图识别。
+
+严格只输出 JSON：
+{
+  "intent": "chat" | "ask_memory" | "ask_location" | "request_action"
+           | "give_item" | "trade" | "comfort" | "threaten" | "pet_animal",
+  "sub_intent": string | null,
+  "sentiment": "positive" | "neutral" | "negative",
+  "urgency": "low" | "normal" | "high",
+  "requires_action": boolean
+}
+
+规则：
+- 询问"你还记得/以前"类 → ask_memory
+- "XX 在哪 / 怎么走" → ask_location
+- "帮我做 / 能不能 XX" → request_action
+- 对动物的抚摸/呼唤 → pet_animal
+
+# 原始文本
+{{raw_text}}
+
+# 目标对象类型
+{{target_entity_type}}

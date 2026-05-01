@@ -227,9 +227,27 @@ class LLMUnavailable(AppError):
 
 
 def register_error_handlers(app: FastAPI) -> None:
+    from app.core.config import get_settings
+    from app.core.logging import get_logger
+
+    logger = get_logger(__name__)
+
     @app.exception_handler(AppError)
     async def _handle_app_error(_: Request, exc: AppError) -> JSONResponse:
-        return JSONResponse(status_code=exc.http_status, content=exc.to_dict())
+        payload = exc.to_dict()
+        # 生产环境脱敏：不返回内部 details，仅保留错误码/文案/trace_id
+        if get_settings().is_prod and exc.http_status >= 500:
+            payload = {
+                "code": exc.code,
+                "message": "服务器内部错误，请稍后再试",
+                "retryable": exc.retryable,
+            }
+            snap = current_trace()
+            if snap.trace_id:
+                payload["trace_id"] = snap.trace_id
+            if snap.request_id:
+                payload["request_id"] = snap.request_id
+        return JSONResponse(status_code=exc.http_status, content=payload)
 
     @app.exception_handler(RequestValidationError)
     async def _handle_validation(_: Request, exc: RequestValidationError) -> JSONResponse:
@@ -238,13 +256,34 @@ def register_error_handlers(app: FastAPI) -> None:
             "code": ErrorCode.SYSTEM_INVALID_ARGUMENTS.value,
             "message": "请求参数不合法",
             "retryable": False,
-            "details": {"errors": exc.errors()},
         }
+        if not get_settings().is_prod:
+            payload["details"] = {"errors": exc.errors()}
         if snap.trace_id:
             payload["trace_id"] = snap.trace_id
         if snap.request_id:
             payload["request_id"] = snap.request_id
         return JSONResponse(status_code=422, content=payload)
+
+    @app.exception_handler(Exception)
+    async def _handle_unexpected(_: Request, exc: Exception) -> JSONResponse:
+        """最终兜底：未被 AppError 捕获的异常统一转成 5xx 响应，生产环境完全脱敏。
+
+        完整堆栈仍然进入后端日志，仅对外屏蔽。
+        """
+        logger.exception("unhandled error: %s", exc)
+        snap = current_trace()
+        is_prod = get_settings().is_prod
+        payload: dict[str, Any] = {
+            "code": ErrorCode.SYSTEM_INTERNAL_ERROR.value,
+            "message": "服务器内部错误" if is_prod else (str(exc) or "服务器内部错误"),
+            "retryable": False,
+        }
+        if snap.trace_id:
+            payload["trace_id"] = snap.trace_id
+        if snap.request_id:
+            payload["request_id"] = snap.request_id
+        return JSONResponse(status_code=500, content=payload)
 
 
 __all__ = [

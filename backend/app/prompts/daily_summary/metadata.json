@@ -1,0 +1,8 @@
+{
+  "id": "daily_summary",
+  "version": "v1",
+  "expected_schema": "DailySummaryOutput",
+  "supported_models": ["qwen-plus", "qwen-max"],
+  "model_role": "reasoning",
+  "last_updated": "2026-05-01"
+}

@@ -1,0 +1,30 @@
+{
+  "cases": [
+    {
+      "case_name": "pronoun_he_to_xiaowang",
+      "input": {
+        "player_block": "- 玩家：阿德",
+        "target_block": "- NPC：小芳",
+        "scene_entities_block": "- npc_xiaowang: 小王",
+        "dialogue_block": "- player: 小王今天会来吗？\n- npc_xiaofang: 他经常上午来。",
+        "raw_text": "他昨天来了吗？"
+      },
+      "expected_schema_valid": true,
+      "expected_resolved_entity_ids": ["npc_xiaowang"],
+      "expected_needs_memory_search": true
+    },
+    {
+      "case_name": "no_pronoun",
+      "input": {
+        "player_block": "- 玩家：阿德",
+        "target_block": "- NPC：陈伯",
+        "scene_entities_block": "-",
+        "dialogue_block": "-",
+        "raw_text": "早安！"
+      },
+      "expected_schema_valid": true,
+      "expected_resolved_entity_ids": [],
+      "expected_needs_memory_search": false
+    }
+  ]
+}

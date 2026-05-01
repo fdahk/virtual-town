@@ -36,6 +36,7 @@
 3. 初始世界不只做 3 个 NPC，而是预置 **6 个人类 NPC + 2 只狗 + 2 只猫 + 1 个玩家角色**。狗、猫也属于 Agent。
 4. 玩家模块是核心模块，玩家角色会被 NPC 感知、记忆和反应，不只是摄像机视角。
 5. LLM 输出必须通过 tool calling / JSON Schema 进入系统，不允许依赖自然语言字符串解析。
+6. **文档与仓库同步**：凡涉及「前端/后端目录树、REST 路径前缀、数据库表清单、WS 信封」的段落，以当前 Git 源码及 `数据模型与接口契约V1.md` 为准并保持随版本更新；本章保留产品级架构叙述，不替代契约文档。
 
 ---
 
@@ -62,13 +63,13 @@
 |------|----------|------|
 | 前端框架 | React + TypeScript + Vite | 构建主 Web 应用 |
 | 地图渲染 | Phaser 3 | 渲染瓦片地图、角色精灵、室内外场景、移动动画 |
-| UI 组件 | React + Ant Design / Shadcn UI | NPC 信息面板、控制台、事件日志、配置页 |
-| 前端状态管理 | Zustand | 管理 NPC 状态、地图状态、仿真状态 |
-| 后端框架 | FastAPI | 提供 REST API、WebSocket、任务调度 |
-| 实时通信 | WebSocket | 推送 NPC 移动、事件、对话和状态变化 |
-| 数据库 | PostgreSQL | 存储用户、NPC、地图、仿真记录 |
-| 向量记忆 | pgvector | 存储 NPC 记忆嵌入，支持相似度检索 |
-| 缓存/队列 | Redis + Celery / RQ | 异步处理 LLM 任务、定时推进仿真 |
+| UI | React + CSS（内联/原生布局）；部分数据用 TanStack Query | MVP 控制台与面板不设 Ant Design / shadcn 依赖 |
+| 前端状态 | Zustand + TanStack Query | Zustand：仿真增量、选中实体等运行时状态；TanStack Query：Agent/记忆等 REST 缓存 |
+| 后端框架 | FastAPI | REST、仿真 WebSocket、观测 WebSocket、`lifespan` 拉起运行时 |
+| 实时通信 | WebSocket | `/ws/simulations/{id}` 推送增量；`/ws/observability` 观测流（可与玩家路由隔离部署） |
+| 数据库 | PostgreSQL | Agent、地图、仿真、记忆、任务与观测审计 |
+| 向量记忆 | pgvector | 记忆嵌入与会话向量检索 |
+| 缓存/队列 | Redis + RQ（独立 worker） | MVP 选型为 **RQ**（非 Celery）；API 进程负责入队，`tasks` 表为权威任务状态 |
 | LLM 接入 | OpenAI 兼容接口封装 | 支持通义千问、DeepSeek、OpenAI 等模型 |
 | 地图编辑 | Tiled Map Editor | 制作室外地图、建筑内部地图、对象层和碰撞层 |
 | 部署 | Docker Compose | 本地和服务器一键启动 |
@@ -119,83 +120,69 @@ React 负责产品界面，Phaser 负责游戏画面，FastAPI 负责仿真服�
 │                  Browser                      │
 │                                              │
 │  React App                                   │
-│  ├── UI 面板：NPC 信息、日志、控制台、配置       │
-│  ├── Zustand：前端状态管理                     │
-│  └── Phaser Canvas：地图、角色、动画            │
+│  ├── 路由：Town / CreatePlayer / Observability │
+│  ├── TanStack Query + Zustand                 │
+│  └── Phaser（TownScene）：Tilemap + 精灵        │
 └─────────────────────┬────────────────────────┘
-                      │ REST + WebSocket
+                      │ REST + WebSocket（仿真 + 观测分离）
 ┌─────────────────────▼────────────────────────┐
 │                 FastAPI Backend               │
 │                                              │
-│  ├── Simulation Service：仿真时钟、步进控制      │
-│  ├── Agent Service：NPC 认知管线                │
-│  ├── World Service：地图、建筑、事件             │
-│  ├── Memory Service：记忆写入、检索、反思         │
-│  ├── LLM Service：统一模型调用                  │
-│  └── WebSocket Gateway：实时广播状态变化         │
+│  ├── SimulationRuntime：仿真时钟、tick、广播      │
+│  ├── SimulationEngine：决策、持久化、事件        │
+│  ├── Agent / World / Memory / Player Service：REST 门面 │
+│  ├── Dialogue / Planning / Safety / Tasks：对话、层次规划、限流审计、RQ 异步任务 │
+│  ├── Observer + EventRouter：可观测性与领域订阅   │
+│  ├── LLM：`app/llm`（chat_json / embed / tools）   │
+│  └── WebSocket：`gateway.py`（统一信封推送）       │
 └──────────────┬────────────────────┬──────────┘
                │                    │
-       PostgreSQL + pgvector        Redis Queue
-       ├── NPC 档案                  ├── LLM 调用任务
-       ├── 地图/建筑                 ├── 对话生成任务
-       ├── 行为/事件日志             └── 反思任务
-       └── 记忆向量
+       PostgreSQL + pgvector        Redis（会话、对话窗、RQ）
+       ├── 地图/Agent/仿真/记忆      ├── agent_decision、embedding、dialogue …
+       ├── tasks / agent_plans     └── TTL、限流计数等键空间（见 Redis 封装）
+       ├── 观测与 tool/llm 审计
+       └── …
 ```
 
 ---
 
 ## 5. 前端架构设计
 
-### 5.1 前端项目结构
+### 5.1 前端项目结构（与 `frontend/src` 一致）
 
 ```text
 frontend/
+├── package.json                     # scripts: dev/build；openapi-typescript → src/types/api.ts（可选）
+├── public/assets/                   # manifest + tilesets + sprites + portraits（见资源方案）
 ├── src/
+│   ├── main.tsx                     # React root + QueryClientProvider
 │   ├── app/
-│   │   ├── App.tsx
-│   │   ├── router.tsx
-│   │   └── providers.tsx
+│   │   └── App.tsx                  # path 分流：/observability ↔ 小镇 / CreatePlayer
 │   ├── pages/
-│   │   ├── TownPage.tsx              # 小镇主页面
-│   │   ├── AgentConfigPage.tsx       # NPC 配置
-│   │   ├── MapEditorPage.tsx         # 可选：地图编辑/建筑配置
-│   │   └── ReplayPage.tsx            # 仿真回放
+│   │   ├── TownPage.tsx             # Phaser + 控制台 + WS 挂载点
+│   │   ├── CreatePlayerPage.tsx
+│   │   └── observability/           # ObservabilityPage、TraceDetail、AgentRuntimeCard
 │   ├── game/
-│   │   ├── PhaserGame.tsx            # React 包裹 Phaser 的组件
+│   │   ├── PhaserGame.tsx           # React 挂载 Phaser Game
+│   │   ├── eventBus.ts              # React ⇄ TownScene 桥接
 │   │   ├── scenes/
-│   │   │   ├── BootScene.ts
-│   │   │   ├── TownScene.ts
-│   │   │   └── UIScene.ts
-│   │   ├── systems/
-│   │   │   ├── AgentSpriteSystem.ts  # NPC 精灵和动画
-│   │   │   ├── MovementSystem.ts     # 路径移动
-│   │   │   ├── BubbleSystem.ts       # 对话气泡/行为气泡
-│   │   │   └── CameraSystem.ts
-│   │   └── maps/
-│   │       ├── town.tmj
-│   │       └── tilesets/
-│   ├── components/
-│   │   ├── AgentPanel.tsx
-│   │   ├── AgentList.tsx
-│   │   ├── EventLog.tsx
-│   │   ├── ChatPanel.tsx
-│   │   ├── TimeControl.tsx
-│   │   └── MemoryViewer.tsx
+│   │   │   └── TownScene.ts         # 单场景：_tilemap/camera/agent sprites（尚无 Boot/UIScene/systems 分包）
+│   │   └── assets/
+│   │       ├── manifest.ts          # fetch manifest JSON
+│   │       └── usePortrait.ts
+│   ├── components/                # AgentPanel, AgentList, ChatPanel, EventLog 等
 │   ├── stores/
-│   │   ├── simulationStore.ts
-│   │   ├── agentStore.ts
-│   │   └── worldStore.ts
+│   │   └── worldStore.ts           # Zustand：仿真快照、选中实体等
 │   ├── api/
-│   │   ├── http.ts
-│   │   ├── websocket.ts
-│   │   ├── agentApi.ts
-│   │   └── simulationApi.ts
+│   │   ├── http.ts                 # fetch 封装
+│   │   ├── index.ts                # api.* 各领域请求（world/agents/player/sim…）
+│   │   └── websocket.ts           # ReliableSocket + simulationSocket / observabilitySocket
 │   └── types/
-│       ├── agent.ts
-│       ├── world.ts
-│       ├── memory.ts
-│       └── simulation.ts
+│       ├── domain.ts              # REST/领域类型（或由 openapi 生成 api.ts）
+│       └── observability.ts
 ```
+
+未落地、仍属方案演进的占位页（可作后续 Sprint）：专用 `AgentConfigPage` / `MapEditorPage` / `ReplayPage`；路由器仅为 `App.tsx` 内 `pathname` 判断而非 `router.tsx`。
 
 ### 5.2 React 和 Phaser 如何配合
 
@@ -255,83 +242,65 @@ React 打开 AgentPanel
 - 暂停仿真。
 - 单步执行。
 - 调整速度。
-- 重置小镇。
-- 保存快照。
-- 回放历史。
+- ~~重置小镇。~~ （若需请以种子/运维脚本重置 DB，参见 `README` / `scripts/reset_db.sh`）
+- ~~保存快照 / 回放历史。~~ MVP 前端未单独的「快照/回放」页；运行时状态以 Postgres + WS 增量为准，历史可通过观测库或后续迭代补齐。
+
+NPC 面板中的「手动指挥 NPC」等亦为渐进能力：当前优先保证创建玩家、仿真控制、对话与观测闭环。
 
 ---
 
 ## 6. 后端架构设计
 
-### 6.1 后端项目结构
+### 6.1 后端目录结构（与 `backend/app` 一致）
 
 ```text
 backend/
+├── alembic/                    # 迁移（非 app/db/migrations）
 ├── app/
-│   ├── main.py
+│   ├── main.py                 # FastAPI、CORS、trace、lifespan（Observer、RQ 入队侧、TTL、仿真运行时）
 │   ├── api/
-│   │   ├── routes_agents.py
-│   │   ├── routes_world.py
-│   │   ├── routes_simulation.py
-│   │   └── routes_memory.py
+│   │   ├── routes_world.py / routes_agents.py / routes_player.py / routes_simulation.py
+│   │   ├── routes_memory.py / routes_dialogue.py / routes_observability.py (+ health)
+│   │   └── __init__.py         # api_router 聚合
 │   ├── websocket/
-│   │   └── connection_manager.py
+│   │   ├── gateway.py          # /ws/simulations/{id}，ConnectionManager + 信封广播
+│   │   └── observability.py    # 观测 WS
 │   ├── domain/
-│   │   ├── agent/
-│   │   │   ├── persona.py
-│   │   │   ├── cognitive_pipeline.py
-│   │   │   ├── perceive.py
-│   │   │   ├── retrieve.py
-│   │   │   ├── plan.py
-│   │   │   ├── reflect.py
-│   │   │   ├── execute.py
-│   │   │   └── converse.py
-│   │   ├── world/
-│   │   │   ├── map.py
-│   │   │   ├── pathfinding.py
-│   │   │   ├── building.py
-│   │   │   └── event.py
-│   │   ├── memory/
-│   │   │   ├── associative_memory.py
-│   │   │   ├── spatial_memory.py
-│   │   │   └── vector_retriever.py
-│   │   └── simulation/
-│   │       ├── simulation_engine.py
-│   │       ├── clock.py
-│   │       └── scheduler.py
+│   │   ├── simulation/          # engine.py、rule_agent、schedule（认知主循环）
+│   │   ├── world/               # grid、scene_cache（权威网格与缓存）
+│   │   ├── memory/              # reflection 等
+│   │   ├── planning/           # hierarchical、importance、relationship
+│   │   ├── dialogue/           # conversation_store、query_rewrite、intent、reply
+│   │   ├── tasks/               # queue、runner、handlers、worker、ttl_worker、registry
+│   │   └── safety/               # content、rate_limit、tool_audit
 │   ├── services/
-│   │   ├── llm_service.py
-│   │   ├── embedding_service.py
-│   │   ├── agent_service.py
-│   │   ├── world_service.py
-│   │   └── simulation_service.py
-│   ├── db/
-│   │   ├── models.py
-│   │   ├── session.py
-│   │   └── migrations/
+│   │   ├── simulation_runtime.py / agent_service.py / world_service.py / memory_service.py
+│   │   ├── player_service.py / event_router.py / observer.py
+│   ├── llm/
+│   │   ├── client.py、agent_decision.py、embedding.py、conversation.py
+│   │   └── tools/               # executor、registry、world/memory/state/animal/dialogue ...
+│   ├── prompts/                 # 每 prompt 一目录：`v1.jinja2` + metadata/examples
+│   ├── db/models.py / session.py
 │   ├── schemas/
-│   │   ├── agent.py
-│   │   ├── world.py
-│   │   ├── memory.py
-│   │   └── websocket.py
-│   └── prompts/
-│       ├── daily_plan.jinja2
-│       ├── task_decompose.jinja2
-│       ├── decide_action.jinja2
-│       ├── conversation.jinja2
-│       └── reflection.jinja2
+│   └── core/                    # config、errors、logging、redis、trace、rate_limit_middleware …
+├── tests/
+└── pyproject.toml
 ```
 
-### 6.2 后端核心服务
+认知管线**未**拆成独立 `domain/agent/perceive.py` 等模块；等价逻辑分布在 `SimulationEngine`、`app/llm/agent_decision.py`、`domain/memory/reflection.py`、`domain/planning` 等处。
 
-| 服务 | 职责 |
+### 6.2 后端核心组件
+
+| 组件 | 职责 |
 |------|------|
-| SimulationService | 管理仿真生命周期、时间推进、暂停/继续 |
-| AgentService | 加载 NPC、执行认知管线、更新行为 |
-| WorldService | 管理地图、建筑、物品、事件、碰撞 |
-| MemoryService | 写入记忆、检索记忆、触发反思 |
-| LLMService | 封装所有模型调用，统一返回 JSON |
-| WebSocketManager | 向前端推送状态变化 |
+| `SimulationRuntime` | 对外 REST/WS 挂载的仿真生命周期（start/pause/step、广播） |
+| `SimulationEngine` | tick：`decide`/规则、`persist`、事件、反思批次、delta 广播 |
+| `AgentService` / `WorldService` / `MemoryService` | Agent 档案与运行态、世界查询、记忆 CRUD / 检索 |
+| `PlayerService` | 玩家创建、`/players/me/move|interact|talk` |
+| `app.llm` | OpenAI 兼容 `chat_json`、embeddings、结构化 tool 管线 |
+| `TaskQueue` + RQ Worker | LLM 决策、embedding、日计划、对话、rewrite 等异步任务落地 |
+| `ConnectionManager`（`websocket/gateway.py`） | 仿真 WS 信封推送 |
+| `Observer` / `EventRouter` | LLM/Task/Trace 入库与观测 API |
 
 ---
 
@@ -529,98 +498,51 @@ relevance_weight = 2.0
 
 ## 9. 数据库设计
 
-### 9.1 核心表
+### 9.1 核心表（与 `backend/app/db/models.py` / Alembic 对齐）
+
+以下为**逻辑分组**，列级定义以 **`数据模型与接口契约V1.md`** 与 OpenAPI 为准。
 
 ```text
-agents
-├── id
-├── name
-├── age
-├── gender
-├── occupation
-├── personality
-├── background
-├── lifestyle
-├── current_goal
-├── current_location_id
-├── x
-├── y
-└── created_at
+# 地图与世界
+map_scenes, map_tiles, locations, portals, world_objects
 
-agent_schedules
-├── id
-├── agent_id
-├── date
-├── start_time
-├── end_time
-├── title
-├── description
-└── status
-
+# Agent 与运行时
+agents                    # 档案；日程规则在 schedule_template(JSONB)，无独立 agent_schedules 表
+agent_states              # 场景、格子坐标、emotion、当前目标等运行时字段
+relationships
 agent_actions
-├── id
-├── agent_id
-├── action_type
-├── description
-├── target_location_id
-├── start_time
-├── end_time
-├── status
-└── metadata
+agent_plans               # 层次规划缓存（与日计划等相关 prompt 对应）
 
-memories
-├── id
-├── agent_id
-├── type                 # event / thought / chat
-├── subject
-├── predicate
-├── object
-├── description
-├── importance
-├── embedding vector
-├── evidence_ids
-├── created_at
-└── last_accessed_at
+# 记忆与对话
+memories                  # memory_type / embedding / importance / importance_detail 等
+dialogue_messages
 
+# 仿真与事件
+simulations
 world_events
-├── id
-├── event_type
-├── location_id
-├── subject_agent_id
-├── object_agent_id
-├── description
-├── start_time
-├── end_time
-└── metadata
 
-locations
-├── id
-├── name
-├── type
-├── x
-├── y
-├── width
-├── height
-├── walkable
-└── metadata
+# 异步任务与可观测审计
+tasks, task_status_log
+observability_events
+llm_calls
+tool_calls
 ```
 
-### 9.2 记忆表设计
+### 9.2 记忆表示示例
 
-记忆节点参考原版 `ConceptNode`，但更结构化：
+契约字段名为 `memory_type`（本节示例中与旧称 `type` 同义）。
 
 ```json
 {
   "id": "mem_001",
   "agent_id": "agent_isabella",
-  "type": "event",
+  "memory_type": "event",
   "subject": "Isabella",
   "predicate": "talked_to",
   "object": "Maria",
   "description": "Isabella talked to Maria about the Valentine's Day party.",
   "importance": 6,
   "keywords": ["Isabella", "Maria", "party"],
-  "embedding": [0.01, 0.02],
   "created_at": "2026-04-30T10:00:00",
   "last_accessed_at": "2026-04-30T10:30:00"
 }
@@ -632,65 +554,39 @@ locations
 
 ### 10.1 REST API
 
-| 方法 | 路径 | 作用 |
-|------|------|------|
-| `GET` | `/api/agents` | 获取 NPC 列表 |
-| `POST` | `/api/agents` | 创建 NPC |
-| `GET` | `/api/agents/{id}` | 获取 NPC 详情 |
-| `PATCH` | `/api/agents/{id}` | 修改 NPC 档案 |
-| `GET` | `/api/agents/{id}/memories` | 查看 NPC 记忆 |
-| `GET` | `/api/agents/{id}/schedule` | 查看 NPC 日程 |
-| `POST` | `/api/simulation/start` | 启动仿真 |
-| `POST` | `/api/simulation/pause` | 暂停仿真 |
-| `POST` | `/api/simulation/step` | 单步执行 |
-| `POST` | `/api/simulation/reset` | 重置仿真 |
-| `GET` | `/api/world/map` | 获取地图逻辑数据 |
-| `GET` | `/api/world/events` | 获取世界事件 |
+**完整路由与请求体以 `数据模型与接口契约V1.md` 与 `/docs` 为准。** 与早期草案差异要点：
+
+| 前缀 / 示例路径 | 说明 |
+|-----------------|------|
+| `/api/world/scenes`、`/tiles`、`/locations`、`/portals`、`/objects`、`/pathfinding` | 地图与物件（非 `/api/world/map` 单路由） |
+| `/api/agents`、`/api/agents/{id}/state|profile|relationships|memories|memory/search`、`/reflect`、`/decide` | Agent 门面 |
+| `/api/players`、`/api/players/me`、`…/move|interact|talk` | 玩家 |
+| `/api/simulations/current`、`…/start|pause|resume|step|speed`、`…/events` | 仿真（路径带 `simulations` 复数） |
+| `/api/dialogue/rewrite-query`、`retrieve-context` | 调试链路子集 |
+| `/api/observability/*`、`/api/health/*` | 观测与健康检查 |
+
+本项目 **不提供** MVP 草案中的「`POST /api/agents` 任意创建」「`POST /api/simulations/reset`」等未被契约采纳的别名；重置世界走运维脚本。
 
 ### 10.2 WebSocket 消息
 
-前端连接：
+仿真连接（玩家小镇页）：
 
 ```text
-ws://localhost:8000/ws/simulation/{simulation_id}
+ws://localhost:8000/ws/simulations/{simulation_id}
 ```
 
-服务端推送示例：
-
-```json
-{
-  "type": "agent_moved",
-  "payload": {
-    "agent_id": "isabella",
-    "from": { "x": 10, "y": 8 },
-    "to": { "x": 11, "y": 8 },
-    "description": "Isabella is walking to Hobbs Cafe",
-    "emoji": "🚶"
-  }
-}
-```
+服务端与客户端一律使用 **统一信封**：
 
 ```json
 {
-  "type": "agent_said",
-  "payload": {
-    "speaker_id": "isabella",
-    "target_id": "maria",
-    "message": "Maria, would you like to help me prepare the party?",
-    "location_id": "hobbs_cafe"
-  }
+  "version": "1.0",
+  "type": "simulation.delta",
+  "payload": { "step": 42, "world_time": "...", "entity_updates": [], "events": [] },
+  "sent_at": "2026-04-30T08:30:00Z"
 }
 ```
 
-```json
-{
-  "type": "time_updated",
-  "payload": {
-    "current_time": "2026-04-30T08:30:00",
-    "step": 42
-  }
-}
-```
+此外还有 `dialogue.message_created`、`world.scene_changed`、`world.hazard_triggered` 等（见契约 §9）。
 
 ---
 
@@ -698,15 +594,16 @@ ws://localhost:8000/ws/simulation/{simulation_id}
 
 ### 11.1 模型接入策略
 
-后端不要直接散落调用通义千问或 OpenAI，而是封装统一接口：
+后端通过 **`app/llm/client.py`** 的 OpenAI 兼容客户端提供 `chat`、`chat_json`、重试与超时；`embeddings` 在 **`app/llm/embedding.py`**。**无需**单独的 `LLMService` 文件命名；调用方注入 `LLMClient` / `embed_text` / `embed_batch` 即可。
+
+等价能力示意：
 
 ```python
-class LLMService:
-    async def chat_json(self, prompt: str, schema: type[BaseModel]) -> BaseModel:
-        ...
+async def chat_json(prompt: str, schema: type[BaseModel]) -> BaseModel:
+    ...
 
-    async def embed(self, text: str) -> list[float]:
-        ...
+async def embed(text: str) -> list[float]:
+    ...
 ```
 
 支持配置：
@@ -1106,47 +1003,24 @@ while simulation.running:
 
 解决：
 
-- 第一版可以先不用 Celery，只用 FastAPI 后台任务。
-- 第一版可以先用 SQLite/PostgreSQL 普通表，后续加 pgvector。
-- 第一版可以先规则日程，再接 LLM。
-- 每阶段都要有可演示成果。
+- MVP 已采用 **Redis + RQ + 独立 worker**；未先引入 Celery。
+- 已使用 PostgreSQL **pgvector** 与 Alembic 迁移；按阶段接 LLM。
+- 每阶段保留可演示闭环（规则日程 → LLM）。
 
 ---
 
-## 19. 推荐最终目录结构
+## 19. 仓库布局（当前 monorepo）
+
+与 `virtual-town` 根目录一致；**前端/后端细部见 §5.1 / §6.1**。
 
 ```text
-virtual-town-react/
-├── frontend/
-│   ├── package.json
-│   ├── vite.config.ts
-│   └── src/
-│       ├── app/
-│       ├── pages/
-│       ├── game/
-│       ├── components/
-│       ├── stores/
-│       ├── api/
-│       └── types/
-├── backend/
-│   ├── pyproject.toml
-│   ├── app/
-│   │   ├── main.py
-│   │   ├── api/
-│   │   ├── websocket/
-│   │   ├── domain/
-│   │   ├── services/
-│   │   ├── db/
-│   │   ├── schemas/
-│   │   └── prompts/
-│   └── tests/
-├── assets/
-│   ├── maps/
-│   ├── tilesets/
-│   └── sprites/
-├── docs/
-│   ├── 项目分析/
-│   └── 实施方案/
+virtual-town/
+├── backend/                 # FastAPI，见 §6.1
+├── frontend/                # Vite + React，见 §5.1
+├── docs/                    # 需求与实施方案（本章为总览）
+├── scripts/                  # dev.sh、seed、reset_db、评测与 license 工具等
+├── e2e/                     # Playwright（若启用）
+├── generative_agents/       # 原版参考代码，非运行时依赖
 ├── docker-compose.yml
 ├── .env.example
 └── README.md

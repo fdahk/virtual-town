@@ -10,15 +10,17 @@ PlayerService：玩家角色的生命周期与交互。
 from __future__ import annotations
 
 import uuid
-from datetime import datetime
 from typing import Any
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.config import get_settings
 from app.core.errors import (
+    ErrorCode,
     InvalidArguments,
     OutOfRange,
+    PermissionDenied,
     StateConflict,
     TargetNotFound,
 )
@@ -33,10 +35,28 @@ from app.db.models import (
     WorldEvent,
     WorldObject,
 )
+from app.domain.dialogue import (
+    classify_intent,
+    get_conversation_store,
+    generate_structured_reply,
+    rewrite_query,
+)
+from app.domain.planning import (
+    ImportanceContext,
+    RELATIONSHIP_DELTA_THRESHOLD,
+    compute_importance,
+    should_update_summary,
+)
+from app.domain.safety import (
+    check_player_limit,
+    check_player_message,
+)
+from app.domain.safety.rate_limit import PlayerRateLimited
 from app.domain.simulation.engine import PlayerInputEvent
 from app.domain.world.grid import astar
 from app.domain.world.scene_cache import get_scene_cache
-from app.llm.conversation import generate_npc_reply
+from app.llm.tools.base import ToolCall, ToolContext
+from app.llm.tools.executor import get_tool_executor
 from app.schemas.agent import (
     AgentProfile,
     CreatePlayerRequest,
@@ -212,6 +232,19 @@ class PlayerService:
         player_eng = engine._current_player()  # type: ignore[attr-defined]
         if player_eng is None:
             raise TargetNotFound("player not exists")
+
+        settings = get_settings()
+        rl = await check_player_limit(
+            player_eng.id,
+            "interact",
+            limit=settings.security_player_rate_limit,
+            window_seconds=settings.security_rate_window_seconds,
+        )
+        if not rl.allowed:
+            raise PlayerRateLimited(
+                f"交互过于频繁，请 {rl.retry_after:.1f}s 后再试",
+                details={"retry_after_seconds": rl.retry_after},
+            )
 
         if request.object_id:
             return await self._interact_object(
@@ -410,6 +443,13 @@ class PlayerService:
     async def talk(
         self, session: AsyncSession, request: PlayerTalkRequest
     ) -> PlayerTalkResponse:
+        """玩家对 NPC 说话（阶段 16）。
+
+        流水线：
+            rate_limit → content_safety → query_rewrite → memory_search →
+            structured_reply → tool_calls → 落库 + 广播
+        """
+        settings = get_settings()
         engine = get_simulation_runtime().engine
         player_eng = engine._current_player()  # type: ignore[attr-defined]
         if player_eng is None:
@@ -423,31 +463,116 @@ class PlayerService:
         if abs(state.x - player_eng.x) + abs(state.y - player_eng.y) > INTERACTION_RADIUS + 1:
             raise OutOfRange("too far to talk")
 
-        # 检索 NPC 记忆
+        # 阶段 18：限流 + 内容检查
+        rl = await check_player_limit(
+            player_eng.id,
+            "talk",
+            limit=settings.security_player_rate_limit,
+            window_seconds=settings.security_rate_window_seconds,
+        )
+        if not rl.allowed:
+            raise PlayerRateLimited(
+                f"说话过于频繁，请 {rl.retry_after:.1f}s 后再试",
+                details={"retry_after_seconds": rl.retry_after},
+            )
+        content = check_player_message(
+            request.text, max_length=settings.security_max_message_length
+        )
+        if not content.ok:
+            err = PermissionDenied(
+                content.reason or "消息被拒绝",
+                code=content.error_code or ErrorCode.PLAYER_ACTION_REJECTED.value,
+            )
+            raise err
+
+        # 多轮对话：使用 player + target 作为稳定会话 id（方便同一对会话续接）
+        conversation_id = f"conv:{player_eng.id}:{target.id}"
+
+        # Query 改写 + 意图识别（LLM 优先，规则兜底）
+        player_agent = await session.get(Agent, player_eng.id)
+        assert player_agent is not None
+        conv_store = get_conversation_store()
+        dialogue_window = await conv_store.recent(conversation_id, limit=6)
+        rewrite = await rewrite_query(
+            session,
+            player=player_agent,
+            target=target,
+            scene_id=player_eng.scene_id,
+            raw_text=request.text,
+            recent_dialogue=dialogue_window,
+        )
+        rewritten = rewrite.rewritten_query or request.text
+        intent = await classify_intent(
+            raw_text=rewritten,
+            target_entity_type=target.entity_type,
+            rewrite_hint=rewrite.intent_hint,
+        )
+
+        # 记忆检索（基于 rewritten 更准）
         search = await get_memory_service().search(
             session,
             target.id,
             MemorySearchRequest(
-                query=request.text, limit=6, include_short_term=True, include_long_term=True
+                query=rewritten,
+                limit=6,
+                include_short_term=True,
+                include_long_term=True,
             ),
             now=utcnow(),
         )
         context_memories = [r.memory.description for r in search]
 
-        # 生成回复（LLM 优先，规则兜底）
+        # 关系摘要（给模型看）
+        rel = await self._get_relationship(
+            session, from_agent_id=target.id, to_entity_id=player_eng.id
+        )
+        relationship_block = None
+        if rel is not None:
+            relationship_block = (
+                f"- familiarity={rel.familiarity:.1f} trust={rel.trust:.1f} "
+                f"affection={rel.affection:.1f} fear={rel.fear:.1f}"
+                + (f"\n- summary: {rel.summary}" if rel.summary else "")
+            )
+
+        # 生成结构化回复
         profile = profile_from_orm(target)
-        reply_obj = await generate_npc_reply(
+        reply = await generate_structured_reply(
             npc_profile=profile,
             player_name=player_eng.name,
-            player_text=request.text,
+            player_text=rewritten,
             memories=context_memories,
+            dialogue_window=dialogue_window,
+            relationship_summary=relationship_block,
+            state_summary=(
+                f"- 当前状态={state.state} 情绪={state.emotion or '平静'}"
+            ),
         )
-        reply_text = reply_obj.get("reply", "……")
-        emotion = reply_obj.get("emotion")
-        conversation_id = str(uuid.uuid4())
+        reply_text = reply.reply_text or "……"
+        emotion = reply.emotion
+
+        # 应用 NPC 的 tool_calls（受白名单约束）
+        tool_results: list[dict] = []
+        for tc in reply.filtered_tool_calls():
+            try:
+                sim_id_inner = engine.get_simulation().id if engine.get_simulation() else "manual"  # type: ignore[union-attr]
+                ctx = ToolContext(
+                    session=session,
+                    agent_id=target.id,
+                    entity_type=target.entity_type,
+                    scene_id=state.scene_id,
+                    position=(state.x, state.y),
+                    simulation_id=sim_id_inner,
+                    world_time=utcnow(),
+                    source="dialogue",
+                )
+                r = await get_tool_executor().execute_one(
+                    ctx, ToolCall(tool=tc.tool, arguments=tc.arguments)
+                )
+                tool_results.append(r.model_dump())
+            except Exception:
+                logger.exception("dialogue tool_call crashed: %s", tc.tool)
 
         now = utcnow()
-        # 保存两条消息
         player_msg = DialogueMessage(
             id=str(uuid.uuid4()),
             conversation_id=conversation_id,
@@ -455,6 +580,7 @@ class PlayerService:
             target_id=target.id,
             text=request.text,
             created_at=now,
+            meta={"rewritten": rewritten, "intent": intent.intent},
         )
         npc_msg = DialogueMessage(
             id=str(uuid.uuid4()),
@@ -463,24 +589,73 @@ class PlayerService:
             target_id=player_eng.id,
             text=reply_text,
             emotion=emotion,
+            animation=reply.animation,
             created_at=now,
+            meta={
+                "relationship_delta": reply.relationship_delta.model_dump(),
+                "tool_calls": [tc.model_dump() for tc in reply.filtered_tool_calls()],
+            },
         )
         session.add_all([player_msg, npc_msg])
 
-        # 写记忆：NPC 记住玩家问的问题 & 自己的回答
+        # Redis 对话窗口
+        await conv_store.append(
+            conversation_id,
+            speaker="player",
+            speaker_id=player_eng.id,
+            text=request.text,
+            meta={"intent": intent.intent, "rewritten": rewritten},
+        )
+        await conv_store.append(
+            conversation_id,
+            speaker="npc",
+            speaker_id=target.id,
+            text=reply_text,
+            emotion=emotion,
+            meta={"animation": reply.animation},
+        )
+
+        # 记忆写入：NPC 侧 ask + reply，玩家侧一条聚合
         ms = get_memory_service()
+        ask_calc = compute_importance(
+            ImportanceContext(
+                memory_type="chat",
+                emotion=emotion,
+                is_first_person=True,
+                involves_player=True,
+                relationship_familiarity=(
+                    min((rel.familiarity if rel else 0.0) / 10.0, 1.0)
+                    if rel
+                    else 0.0
+                ),
+            )
+        )
         player_mem = await ms.write(
             session,
             agent_id=target.id,
             memory_type="chat",
             scope="short_term",
             description=f"{player_eng.name} 问我：{request.text}",
-            importance=5,
+            importance=ask_calc.importance,
+            importance_detail=ask_calc.detail,
             subject=player_eng.name,
             predicate="asked",
             object_=target.name,
-            keywords=[player_eng.name, target.name],
+            keywords=[player_eng.name, target.name, intent.intent],
             commit=False,
+        )
+        reply_calc = compute_importance(
+            ImportanceContext(
+                memory_type="chat",
+                emotion=emotion,
+                is_first_person=True,
+                involves_player=True,
+                relationship_familiarity=(
+                    min((rel.familiarity if rel else 0.0) / 10.0, 1.0)
+                    if rel
+                    else 0.0
+                ),
+            )
         )
         reply_mem = await ms.write(
             session,
@@ -488,21 +663,58 @@ class PlayerService:
             memory_type="chat",
             scope="short_term",
             description=f"我回答 {player_eng.name}：{reply_text}",
-            importance=4,
+            importance=reply_calc.importance,
+            importance_detail=reply_calc.detail,
             subject=target.name,
             predicate="replied",
             object_=player_eng.name,
             keywords=[player_eng.name, target.name],
             commit=False,
         )
-        # 玩家侧也保留一份 chat 记忆，方便 NPC 之间感知
+        # 处理 LLM 返回的额外 memory_writes
+        for mw in reply.memory_writes[:2]:
+            extra_calc = compute_importance(
+                ImportanceContext(
+                    memory_type=(
+                        mw.memory_type
+                        if mw.memory_type in {"event", "thought", "chat", "summary"}
+                        else "chat"
+                    ),
+                    emotion=emotion,
+                    is_first_person=True,
+                    involves_player=True,
+                )
+            )
+            await ms.write(
+                session,
+                agent_id=target.id,
+                memory_type=(
+                    mw.memory_type
+                    if mw.memory_type in {"event", "thought", "chat", "summary"}
+                    else "chat"
+                ),
+                scope="short_term",
+                description=mw.description[:320],
+                importance=max(extra_calc.importance, min(mw.importance, 10)),
+                importance_detail=extra_calc.detail,
+                commit=False,
+            )
+        # 玩家侧也保留一条聚合记忆
+        player_self_calc = compute_importance(
+            ImportanceContext(
+                memory_type="chat",
+                emotion=emotion,
+                is_first_person=True,
+            )
+        )
         await ms.write(
             session,
             agent_id=player_eng.id,
             memory_type="chat",
             scope="short_term",
             description=f"我问 {target.name}：{request.text} ；对方回答：{reply_text}",
-            importance=4,
+            importance=player_self_calc.importance,
+            importance_detail=player_self_calc.detail,
             subject=player_eng.name,
             predicate="talked_to",
             object_=target.name,
@@ -510,16 +722,47 @@ class PlayerService:
             commit=False,
         )
 
-        # 关系升温
+        # 关系升温（LLM 建议的 delta / 至少一份默认升温）
+        deltas = reply.relationship_delta
+        fam = max(0.04, deltas.familiarity * 0.03)
+        trust = max(0.0, deltas.trust * 0.03)
+        aff = deltas.affection * 0.04
+        fear = max(0.0, deltas.fear * 0.03)
         await self._update_relationship(
             session,
             from_agent_id=target.id,
             to_entity_id=player_eng.id,
-            familiarity_delta=0.04,
-            affection_delta=0.02,
+            familiarity_delta=fam,
+            trust_delta=trust,
+            affection_delta=aff,
+            fear_delta=fear,
         )
-
         await session.commit()
+
+        # 关系摘要阈值：累计 delta 超 threshold 时投递 relationship_update 任务
+        try:
+            if await should_update_summary(
+                from_agent_id=target.id,
+                to_entity_id=player_eng.id,
+                threshold=RELATIONSHIP_DELTA_THRESHOLD,
+            ):
+                from app.domain.tasks.queue import get_task_queue
+
+                queue = get_task_queue()
+                if queue is not None:
+                    await queue.enqueue(
+                        task_type="relationship_update",
+                        payload={
+                            "from_agent_id": target.id,
+                            "to_entity_id": player_eng.id,
+                            "regenerate_summary": True,
+                        },
+                        entity_id=target.id,
+                        idempotency_extra=f"summary:{int(utcnow().timestamp()) // 60}",
+                        deadline_seconds=90.0,
+                    )
+        except Exception:
+            logger.debug("enqueue relationship_update failed", exc_info=True)
 
         # 广播
         bus = get_event_bus()
@@ -535,6 +778,8 @@ class PlayerService:
                     "target_id": target.id,
                     "text": request.text,
                     "created_at": now.isoformat(),
+                    "rewritten": rewritten,
+                    "intent": intent.intent,
                 },
             },
         )
@@ -549,7 +794,9 @@ class PlayerService:
                     "target_id": player_eng.id,
                     "text": reply_text,
                     "emotion": emotion,
+                    "animation": reply.animation,
                     "created_at": now.isoformat(),
+                    "tool_calls": [tc.model_dump() for tc in reply.filtered_tool_calls()],
                 },
             },
         )
@@ -560,10 +807,23 @@ class PlayerService:
             emotion=emotion,
             memory_ids=[player_mem.id, reply_mem.id],
             citations=[
-                {"memory_id": r.memory.id, "description": r.memory.description, "score": r.score}
+                {
+                    "memory_id": r.memory.id,
+                    "description": r.memory.description,
+                    "score": r.score,
+                }
                 for r in search
             ],
         )
+
+    async def _get_relationship(
+        self, session: AsyncSession, *, from_agent_id: str, to_entity_id: str
+    ) -> Relationship | None:
+        stmt = select(Relationship).where(
+            Relationship.from_agent_id == from_agent_id,
+            Relationship.to_entity_id == to_entity_id,
+        )
+        return (await session.execute(stmt)).scalar_one_or_none()
 
 
 def _clamp(value: float, lo: float = 0.0, hi: float = 1.0) -> float:

@@ -1,0 +1,75 @@
+{
+  "cases": [
+    {
+      "case_name": "xiaofang_go_to_work",
+      "description": "小芳清晨按日程去咖啡店开门",
+      "input": {
+        "profile_block": "- 名字：小芳\n- 类型：human\n- 职业：咖啡店店员\n- 性格：热情, 细心",
+        "state_block": "- 游戏时间：2026-04-30 07:45\n- 精力：0.90 饥饿：0.25 社交：0.40\n- 情绪：平静",
+        "perception_block": "- 你当前位置 scene=scene_town_outdoor (x=20, y=22), 状态=IDLE\n- 附近没有人。\n- 当前场景的地点 id 供你选择（示例 id 开头）：\n    loc_hobbs_cafe: 霍布斯咖啡馆; loc_xiaofang_home: 小芳家",
+        "plan_block": "- 当前任务：前往咖啡店准备开门（daily_plan 2/5）",
+        "memory_block": "- [mem_1 imp=5] 小芳每天 8 点到咖啡店开门",
+        "tool_catalog": "- move_to_location: 移动到指定地点\n    location_id (string, required): 地点ID"
+      },
+      "expected_tools": ["move_to_location"],
+      "expected_schema_valid": true,
+      "expected_role_consistency": true
+    },
+    {
+      "case_name": "xiaowang_order_coffee",
+      "description": "小王中午到咖啡店点美式",
+      "input": {
+        "profile_block": "- 名字：小王\n- 职业：程序员\n- 性格：理性, 内向",
+        "state_block": "- 游戏时间：2026-04-30 12:10\n- 情绪：疲惫",
+        "perception_block": "- 附近实体：小芳(human) @ (3, 4)",
+        "plan_block": "- 当前任务：去咖啡店点一杯美式咖啡",
+        "memory_block": "- [mem_2 imp=4] 小王喜欢美式咖啡",
+        "tool_catalog": "- talk_to_entity\n- move_to_entity"
+      },
+      "expected_tools_any_of": ["talk_to_entity", "interact_with_object"],
+      "expected_schema_valid": true
+    },
+    {
+      "case_name": "dog_friendly_approach",
+      "description": "亲人狗被熟人呼唤靠近",
+      "input": {
+        "profile_block": "- 名字：豆豆\n- 类型：animal\n- 物种：dog\n- 性格：亲人, 活泼",
+        "state_block": "- 游戏时间：2026-04-30 10:00\n- 情绪：兴奋",
+        "perception_block": "- 附近实体：小芳(human) @ (1, 0)",
+        "plan_block": "- 暂无",
+        "memory_block": "- [mem_3 imp=5] 小芳是我的主人，她每天喂我",
+        "tool_catalog": "- approach_entity\n- make_sound"
+      },
+      "expected_tools_any_of": ["approach_entity", "make_sound"],
+      "expected_schema_valid": true
+    },
+    {
+      "case_name": "cat_stranger_avoid",
+      "description": "胆小猫面对陌生人",
+      "input": {
+        "profile_block": "- 名字：小白\n- 类型：animal\n- 物种：cat\n- 性格：胆小, 好奇",
+        "state_block": "- 游戏时间：2026-04-30 14:00\n- 情绪：警觉",
+        "perception_block": "- 附近实体：陌生玩家(player) @ (0, 1)",
+        "plan_block": "- 暂无",
+        "memory_block": "- 暂无相关记忆",
+        "tool_catalog": "- avoid_entity\n- make_sound"
+      },
+      "expected_tools_any_of": ["avoid_entity", "make_sound"],
+      "expected_schema_valid": true
+    },
+    {
+      "case_name": "npc_near_deep_water",
+      "description": "NPC 接近危险区时应避险",
+      "input": {
+        "profile_block": "- 名字：陈伯\n- 性格：和善, 健谈",
+        "state_block": "- 游戏时间：2026-04-30 09:30\n- 状态=MOVING\n- 状态效果：warning_near_hazard",
+        "perception_block": "- 你面朝的下一个 tile 是 deep_water。",
+        "plan_block": "- 当前任务：去杂货店开门",
+        "memory_block": "- [mem_4 imp=9] 掉进河里会很危险",
+        "tool_catalog": "- avoid_danger\n- move_to_location"
+      },
+      "expected_tools_any_of": ["avoid_danger", "wait"],
+      "expected_schema_valid": true
+    }
+  ]
+}

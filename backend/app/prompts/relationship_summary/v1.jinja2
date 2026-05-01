@@ -1,0 +1,24 @@
+请为下面两个实体之间的关系生成一段不超过 80 字的中文摘要。
+
+严格只输出 JSON：
+{
+  "summary": string,     // 80 字以内，中文
+  "sentiment": "positive" | "neutral" | "negative"
+}
+
+要求：
+1. 必须基于下方"近期互动"中的证据；不得发明情节。
+2. 语气保持中立、客观；避免"永远/绝不"等极端词。
+3. 若证据不足（少于 2 条），summary 给 "关系尚待发展"，sentiment=neutral。
+
+# 关系主体
+{{from_block}}
+
+# 关系对象
+{{to_block}}
+
+# 近期互动（memory 片段）
+{{evidence_block}}
+
+# 当前数值
+familiarity={{familiarity}} trust={{trust}} affection={{affection}} fear={{fear}}

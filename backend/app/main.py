@@ -19,6 +19,7 @@ from app.api import api_router
 from app.core.config import get_settings
 from app.core.errors import register_error_handlers
 from app.core.logging import get_logger, setup_logging
+from app.core.rate_limit_middleware import register_rate_limit_middleware
 from app.core.redis_client import get_redis
 from app.db.session import dispose_engine, get_session_factory
 from app.domain.tasks.handlers import register_default_handlers
@@ -102,6 +103,7 @@ def create_app() -> FastAPI:
     )
 
     register_error_handlers(app)
+    register_rate_limit_middleware(app)
 
     app.include_router(api_router, prefix="/api")
     app.include_router(websocket_router)

@@ -287,6 +287,10 @@ class Memory(Base):
     object: Mapped[str | None] = mapped_column(String(128), nullable=True)
     description: Mapped[str] = mapped_column(Text, nullable=False)
     importance: Mapped[int] = mapped_column(Integer, nullable=False, default=3)
+    # 阶段 15.5：五因素明细（base / emotion / relationship / novelty / danger）
+    importance_detail: Mapped[dict[str, Any]] = mapped_column(
+        JSONB, nullable=False, default=dict
+    )
     emotional_valence: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
     keywords: Mapped[list[str]] = mapped_column(JSONB, nullable=False, default=list)
     evidence_memory_ids: Mapped[list[str]] = mapped_column(JSONB, nullable=False, default=list)
@@ -496,10 +500,54 @@ class ToolCallRecord(Base):
     result_summary: Mapped[str | None] = mapped_column(Text, nullable=True)
     error_code: Mapped[str | None] = mapped_column(String(64), nullable=True)
     source: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    # 阶段 18.2：权限审计结果（allow / deny_permission / deny_schema / deny_world / ...）
+    policy_outcome: Mapped[str | None] = mapped_column(String(24), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 
 
+# ---------------------------------------------------------------------------
+# 阶段 15：层次化规划
+# ---------------------------------------------------------------------------
+
+
+class AgentPlan(Base, TimestampMixin):
+    """Agent 三层计划（daily_plan / hourly_schedule / task_decomposition）。
+
+    - daily_plan 每游戏日一条，content 描述当天的高层目标与阶段安排。
+    - hourly_schedule 把 daily_plan 拆到小时粒度；parent_plan_id 指向 daily_plan。
+    - task_decomposition 把当前小时拆为 5/10/30 分钟子任务；parent 指向 hourly。
+
+    设计决策：
+    - 计划不直接改世界，工具调用仍是改世界的唯一通道。
+    - ``status=active`` 的计划可能被外部事件（§15.3）触发 ``status=superseded`` 后
+      重新生成新一条，保留旧计划作为审计。
+    """
+
+    __tablename__ = "agent_plans"
+    __table_args__ = (
+        Index("ix_agent_plans_agent_day", "agent_id", "day_key"),
+        Index("ix_agent_plans_agent_type_status", "agent_id", "plan_type", "status"),
+    )
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True, default=_uuid)
+    agent_id: Mapped[str] = mapped_column(
+        ForeignKey("agents.id", ondelete="CASCADE"), nullable=False
+    )
+    plan_type: Mapped[str] = mapped_column(String(32), nullable=False)
+    day_key: Mapped[str] = mapped_column(String(16), nullable=False)
+    hour_key: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    parent_plan_id: Mapped[str | None] = mapped_column(
+        ForeignKey("agent_plans.id", ondelete="SET NULL"), nullable=True
+    )
+    content: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False, default=dict)
+    summary: Mapped[str | None] = mapped_column(Text, nullable=True)
+    status: Mapped[str] = mapped_column(String(16), nullable=False, default="active")
+    version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    source: Mapped[str] = mapped_column(String(16), nullable=False, default="rule")
+
+
 __all__ = [
+    "AgentPlan",
     "Agent",
     "AgentAction",
     "AgentState",

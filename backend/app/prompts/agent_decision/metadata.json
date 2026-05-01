@@ -1,0 +1,9 @@
+{
+  "id": "agent_decision",
+  "version": "v1",
+  "expected_schema": "AgentDecisionOutput",
+  "supported_models": ["qwen-plus", "qwen-max", "deepseek-chat", "gpt-4o-mini"],
+  "model_role": "chat",
+  "last_updated": "2026-05-01",
+  "description": "NPC 自主决策 prompt：结合角色档案、感知、记忆、层次化计划选择工具。"
+}

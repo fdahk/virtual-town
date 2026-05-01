@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Literal
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
@@ -18,6 +18,8 @@ class Memory(BaseModel):
     object: str | None = None
     description: str
     importance: int
+    # 阶段 15.5：五因素明细（base / emotion / relationship / novelty / danger）
+    importance_detail: dict[str, Any] = Field(default_factory=dict)
     emotional_valence: float = 0.0
     keywords: list[str] = Field(default_factory=list)
     evidence_memory_ids: list[str] = Field(default_factory=list)

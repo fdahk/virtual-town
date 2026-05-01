@@ -253,6 +253,7 @@ class Observer:
         caller_agent_id: str | None = None,
         entity_type: str | None = None,
         source: str | None = None,
+        policy_outcome: str | None = None,
     ) -> None:
         snap = current_trace()
         now = utcnow()
@@ -269,6 +270,7 @@ class Observer:
             "caller_agent_id": caller_agent_id or snap.agent_id,
             "entity_type": entity_type,
             "source": source,
+            "policy_outcome": policy_outcome,
             "simulation_id": snap.simulation_id,
             "trace_id": snap.trace_id,
             "span_id": snap.span_id,
