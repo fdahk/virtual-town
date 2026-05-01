@@ -89,6 +89,15 @@ export const api = {
     }>("/api/players/me/interact", body),
   talkPlayer: (body: { target_entity_id: string; text: string }) =>
     apiPost<PlayerTalkResponse>("/api/players/me/talk", body),
+  /** 向目标 NPC 靠近，服务端计算截断路径，返回 reason="in_range" 时已可对话 */
+  approachNpc: (body: { npc_id: string }) =>
+    apiPost<{ accepted: boolean; path: TilePosition[]; reason: string | null }>(
+      "/api/players/me/approach",
+      body,
+    ),
+  /** 玩家关闭对话界面，释放 NPC CHATTING 状态 */
+  endChat: (body: { npc_id: string }) =>
+    apiPost<{ ok: boolean }>("/api/players/me/end_chat", body),
 
   // ---- simulation ----
   getCurrentSimulation: () => apiGet<Simulation>("/api/simulations/current"),

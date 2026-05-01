@@ -485,7 +485,12 @@ export class TownScene extends Phaser.Scene {
       "pointerdown",
       (_p: Phaser.Input.Pointer, _x: number, _y: number, event?: Phaser.Types.Input.EventData) => {
         event?.stopPropagation();
+        // 选中 agent（用于右侧面板展示）
         eventBus.emit({ type: "player.click_agent", payload: { agentId: profile.id } });
+        // 非玩家 NPC：启动自动追踪靠近
+        if (profile.entity_type !== "player") {
+          eventBus.emit({ type: "player.track_agent", payload: { agentId: profile.id } });
+        }
       },
     );
 
@@ -657,6 +662,8 @@ export class TownScene extends Phaser.Scene {
     const ty = Math.floor(worldY / DISPLAY_TILE);
     if (tx < 0 || ty < 0) return;
     this.showHighlight(tx, ty);
+    // 点击地图空格时取消任何正在进行的 NPC 追踪
+    eventBus.emit({ type: "player.stop_tracking", payload: {} });
     eventBus.emit({ type: "player.click_tile", payload: { x: tx, y: ty, sceneId: this.currentSceneId } });
   }
 

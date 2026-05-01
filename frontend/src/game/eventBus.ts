@@ -12,7 +12,11 @@ export type GameEvent =
   | { type: "player.click_agent"; payload: { agentId: string } }
   | { type: "player.click_object"; payload: { objectId: string } }
   | { type: "world.dataset.loaded"; payload: { sceneId: string } }
-  | { type: "debug.layer.toggle"; payload: { layer: "collision" | "hazard" | "portal"; enabled: boolean } };
+  | { type: "debug.layer.toggle"; payload: { layer: "collision" | "hazard" | "portal"; enabled: boolean } }
+  /** 玩家点击 NPC，开始自动追踪靠近 */
+  | { type: "player.track_agent"; payload: { agentId: string } }
+  /** 玩家点击地图空格或手动取消，停止追踪 */
+  | { type: "player.stop_tracking"; payload: Record<string, never> };
 
 type Handler = (event: GameEvent) => void;
 

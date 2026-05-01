@@ -10,6 +10,7 @@ import type {
   ToolCallRecord,
 } from "../../types/observability";
 import type { WorldEvent } from "../../types/domain";
+import { CopyableTruncatedId, copyObservabilityText } from "./CopyableTruncatedId";
 import { TraceDetail } from "./TraceDetail";
 import { AgentRuntimeCard } from "./AgentRuntimeCard";
 
@@ -301,9 +302,7 @@ function ObservabilityEventsView() {
           e.title ?? "-",
           e.entity_id ?? "-",
           e.trace_id ? (
-            <a key={e.id} href={`#trace-${e.trace_id}`} style={styles.link}>
-              {e.trace_id.slice(0, 12)}…
-            </a>
+            <CopyableTruncatedId key={e.id} id={e.trace_id} previewChars={12} />
           ) : (
             "-"
           ),
@@ -368,7 +367,13 @@ function TracesView() {
                 key={tid}
                 type="button"
                 style={styles.chip}
+                title={`${tid}\n单击查看详情 · 双击复制完整 ID`}
                 onClick={() => setTraceId(tid)}
+                onDoubleClick={(ev) => {
+                  ev.preventDefault();
+                  ev.stopPropagation();
+                  void copyObservabilityText(tid);
+                }}
               >
                 {tid.slice(0, 14)}…
               </button>
@@ -410,7 +415,7 @@ function LLMCallsView() {
           r.schema_valid === null ? "-" : boolBadge(r.schema_valid),
           boolBadge(r.fallback_used, true),
           r.error_code ?? "-",
-          r.trace_id ? r.trace_id.slice(0, 12) + "…" : "-",
+          r.trace_id ? <CopyableTruncatedId id={r.trace_id} previewChars={12} /> : "-",
         ])}
       />
     </div>
@@ -441,7 +446,7 @@ function ToolCallsView() {
           boolBadge(r.success),
           `${r.duration_ms}ms`,
           r.error_code ?? "-",
-          r.trace_id ? r.trace_id.slice(0, 12) + "…" : "-",
+          r.trace_id ? <CopyableTruncatedId id={r.trace_id} previewChars={12} /> : "-",
         ])}
       />
     </div>
@@ -497,7 +502,7 @@ function TasksView() {
           `${r.retry_count}/${r.max_retries}`,
           r.last_error ? r.last_error.slice(0, 40) + "…" : "-",
           <span key="k" style={{ fontSize: 11, color: "#8b949e" }}>{r.idempotency_key}</span>,
-          r.trace_id ? r.trace_id.slice(0, 12) + "…" : "-",
+          r.trace_id ? <CopyableTruncatedId id={r.trace_id} previewChars={12} /> : "-",
         ])}
       />
     </div>
@@ -545,7 +550,7 @@ function ErrorsView() {
           <span key="t" style={styles.code}>{r.event_type}</span>,
           r.title ?? "-",
           r.entity_id ?? "-",
-          r.trace_id ? r.trace_id.slice(0, 12) + "…" : "-",
+          r.trace_id ? <CopyableTruncatedId id={r.trace_id} previewChars={12} /> : "-",
         ])}
       />
     </div>
@@ -974,7 +979,6 @@ const styles: Record<string, React.CSSProperties> = {
     fontSize: 12,
     color: "#c0caf5",
   },
-  link: { color: "#79c0ff", textDecoration: "none", fontFamily: "monospace" },
   table: {
     width: "100%",
     borderCollapse: "collapse",

@@ -18,11 +18,19 @@ function clamp(n: number, min: number, max: number): number {
   return Math.max(min, Math.min(max, n));
 }
 
+const INTERACTION_RADIUS = 2; // 与后端 player_service.INTERACTION_RADIUS 保持一致
+
 export function TownPage() {
   const sceneRef = useRef<TownScene | null>(null);
   const loadedScenesRef = useRef(new Set<string>());
   const [sceneReady, setSceneReady] = useState(false);
   const [memoryViewerFor, setMemoryViewerFor] = useState<string | null>(null);
+
+  // 追踪状态（用 ref 避免 stale closure；同步写入 store 用于 UI 提示）
+  const trackingRef = useRef<string | null>(null);
+  const lastApproachRef = useRef<number>(0);
+  // 始终指向最新 store，用于在事件回调中读取
+  const storeRef = useRef(useWorldStore.getState());
 
   const [viewport, setViewport] = useState(() => ({
     w: typeof window !== "undefined" ? window.innerWidth : 1200,
@@ -101,6 +109,8 @@ export function TownPage() {
   }, [leftMax, footerMax]);
 
   const store = useWorldStore();
+  // 始终保持 storeRef 与最新状态同步
+  storeRef.current = store;
 
   useEffect(() => {
     (async () => {
@@ -235,10 +245,57 @@ export function TownPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [store.playerSceneId, sceneReady, store.player?.id]);
 
+  // 追踪辅助：检查是否已在交互范围，决定是继续靠近还是开对话
+  const checkTrackingProximity = useCallback(() => {
+    const targetId = trackingRef.current;
+    if (!targetId) return;
+    const s = storeRef.current;
+    const playerId = s.player?.id;
+    if (!playerId) return;
+    const playerRt = s.runtimeByAgent[playerId];
+    const npcRt = s.runtimeByAgent[targetId];
+    if (!playerRt || !npcRt || playerRt.scene_id !== npcRt.scene_id) return;
+
+    const dist =
+      Math.abs(playerRt.position.x - npcRt.position.x) +
+      Math.abs(playerRt.position.y - npcRt.position.y);
+
+    if (dist <= INTERACTION_RADIUS) {
+      // 进入交互半径：停止追踪，自动开启对话（仅人类 NPC）
+      trackingRef.current = null;
+      s.setTrackingAgent(null);
+      const npcProfile = s.agents[targetId];
+      if (npcProfile && npcProfile.entity_type === "human") {
+        s.setPendingDialogue({ targetId, targetName: npcProfile.name });
+      } else if (npcProfile && npcProfile.entity_type === "animal") {
+        // 动物：直接触发抚摸交互
+        api
+          .interactPlayer({ entity_id: targetId, interaction_type: "pet" })
+          .catch(() => null);
+      }
+      return;
+    }
+
+    // 尚未进入范围：限流后重新发送靠近指令（每 1.5 秒最多一次）
+    const now = Date.now();
+    if (now - lastApproachRef.current < 1500) return;
+    lastApproachRef.current = now;
+    api.approachNpc({ npc_id: targetId }).catch(() => null);
+  }, []); // 无依赖：只通过 ref 读取最新状态
+
   // 来自 Phaser 的事件桥接
   useEffect(() => {
     return eventBus.on(async (evt) => {
-      if (evt.type === "player.click_tile") {
+      if (evt.type === "player.track_agent") {
+        // 开始追踪：立刻发送第一次靠近指令
+        trackingRef.current = evt.payload.agentId;
+        storeRef.current.setTrackingAgent(evt.payload.agentId);
+        lastApproachRef.current = 0; // 重置冷却，允许立即执行
+        checkTrackingProximity();
+      } else if (evt.type === "player.stop_tracking") {
+        trackingRef.current = null;
+        storeRef.current.setTrackingAgent(null);
+      } else if (evt.type === "player.click_tile") {
         const { x, y, sceneId } = evt.payload;
         if (sceneId !== store.playerSceneId) return;
         try {
@@ -259,10 +316,20 @@ export function TownPage() {
           const code = (err as { code?: string }).code;
           if (code !== "OUT_OF_RANGE") console.warn("[interact] failed", err);
         }
+      } else if (evt.type === "runtime.update") {
+        // 每次收到位置更新时检查追踪状态（只有玩家或目标 NPC 移动时才检查）
+        const targetId = trackingRef.current;
+        if (
+          targetId &&
+          (evt.payload.agentId === targetId ||
+            evt.payload.agentId === storeRef.current.player?.id)
+        ) {
+          checkTrackingProximity();
+        }
       }
     });
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [store.playerSceneId]);
+  }, [store.playerSceneId, checkTrackingProximity]);
 
   const showLeft = leftPanelWidth > 0;
   const showFooter = footerHeight > 0;
@@ -276,6 +343,26 @@ export function TownPage() {
         <TimeControl />
         <div style={{ marginLeft: "auto", display: "flex", gap: 10, alignItems: "center" }}>
           <DebugToggle />
+          {store.trackingAgentId && (
+            <span
+              style={{
+                fontSize: 12,
+                color: "#ffd060",
+                background: "rgba(255,208,96,0.1)",
+                border: "1px solid rgba(255,208,96,0.3)",
+                borderRadius: 4,
+                padding: "2px 8px",
+                cursor: "pointer",
+              }}
+              title="点击取消追踪"
+              onClick={() => {
+                trackingRef.current = null;
+                store.setTrackingAgent(null);
+              }}
+            >
+              ↗ 追踪：{store.agents[store.trackingAgentId]?.name ?? store.trackingAgentId}
+            </span>
+          )}
           <span style={{ fontSize: 12, opacity: 0.6 }}>
             玩家：{store.player?.name} · 场景：
             {store.playerSceneId ? store.scenes[store.playerSceneId]?.name : "-"}

@@ -59,7 +59,9 @@ from app.llm.tools.base import ToolCall, ToolContext
 from app.llm.tools.executor import get_tool_executor
 from app.schemas.agent import (
     AgentProfile,
+    ApproachNpcRequest,
     CreatePlayerRequest,
+    EndChatRequest,
     PlayerInteractRequest,
     PlayerInteractResponse,
     PlayerMoveRequest,
@@ -220,6 +222,75 @@ class PlayerService:
             accepted=True,
             path=[TilePosition(x=x, y=y) for x, y in move_path],
         )
+
+    # ------------------------------------------------------------------
+    # 追踪靠近 NPC
+    # ------------------------------------------------------------------
+
+    async def approach_npc(
+        self, session: AsyncSession, request: ApproachNpcRequest  # noqa: ARG002
+    ) -> PlayerMoveResponse:
+        """
+        计算从玩家当前位置到目标 NPC 交互半径内的路径并加入引擎队列。
+        若玩家已在交互半径内，返回 reason="in_range"（path 为空）。
+        """
+        engine = get_simulation_runtime().engine
+        player_eng = engine._current_player()  # type: ignore[attr-defined]
+        if player_eng is None:
+            raise TargetNotFound("player not exists")
+
+        npc_eng = engine.get_agent(request.npc_id)
+        if npc_eng is None:
+            raise TargetNotFound(f"agent {request.npc_id} not found")
+        if npc_eng.scene_id != player_eng.scene_id:
+            return PlayerMoveResponse(accepted=False, reason="different_scene")
+
+        npc_pos = (npc_eng.x, npc_eng.y)
+        player_pos = (player_eng.x, player_eng.y)
+        dist = abs(npc_pos[0] - player_pos[0]) + abs(npc_pos[1] - player_pos[1])
+        if dist <= INTERACTION_RADIUS:
+            return PlayerMoveResponse(accepted=True, path=[], reason="in_range")
+
+        grid = get_scene_cache().get_grid(player_eng.scene_id)
+        if grid is None:
+            raise StateConflict("scene grid missing")
+
+        path = astar(grid, player_pos, npc_pos, avoid_hazards=False)
+        if not path:
+            return PlayerMoveResponse(accepted=False, reason="not_reachable")
+
+        # 截断路径：当离 NPC 距离 ≤ INTERACTION_RADIUS 时停下
+        approach_path: list[tuple[int, int]] = []
+        for tile in path[1:]:  # 去掉起点
+            approach_path.append(tile)
+            remaining = abs(tile[0] - npc_pos[0]) + abs(tile[1] - npc_pos[1])
+            if remaining <= INTERACTION_RADIUS:
+                break
+
+        if not approach_path:
+            return PlayerMoveResponse(accepted=True, path=[], reason="in_range")
+
+        get_simulation_runtime().enqueue_player_input(
+            PlayerInputEvent(
+                kind="move_path",
+                payload={"path": [{"x": x, "y": y} for x, y in approach_path]},
+            )
+        )
+        return PlayerMoveResponse(
+            accepted=True,
+            path=[TilePosition(x=x, y=y) for x, y in approach_path],
+        )
+
+    # ------------------------------------------------------------------
+    # 结束对话（释放 NPC CHATTING 状态）
+    # ------------------------------------------------------------------
+
+    async def end_chat(
+        self, session: AsyncSession, request: EndChatRequest  # noqa: ARG002
+    ) -> dict:
+        engine = get_simulation_runtime().engine
+        engine.end_chatting(request.npc_id)
+        return {"ok": True}
 
     # ------------------------------------------------------------------
     # 交互
@@ -462,6 +533,9 @@ class PlayerService:
             raise OutOfRange("target in another scene")
         if abs(state.x - player_eng.x) + abs(state.y - player_eng.y) > INTERACTION_RADIUS + 1:
             raise OutOfRange("too far to talk")
+
+        # 令 NPC 进入 CHATTING 状态：停止移动，专注对话
+        engine.start_chatting(target.id)
 
         # 阶段 18：限流 + 内容检查
         rl = await check_player_limit(

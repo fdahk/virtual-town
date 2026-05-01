@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { useWorldStore } from "../stores/worldStore";
 import { api } from "../api";
 import { usePortrait } from "../game/assets/usePortrait";
@@ -20,6 +20,14 @@ export function ChatPanel() {
   const inputRef = useRef<HTMLInputElement>(null);
   const portrait = usePortrait(pending?.targetId ?? null);
 
+  const handleClose = useCallback(() => {
+    if (pending?.targetId) {
+      // 释放 NPC 的 CHATTING 状态，让 NPC 恢复自主行动
+      api.endChat({ npc_id: pending.targetId }).catch(() => null);
+    }
+    setPending(null);
+  }, [pending, setPending]);
+
   useEffect(() => {
     if (pending) {
       setMessages([]);
@@ -28,6 +36,15 @@ export function ChatPanel() {
       setTimeout(() => inputRef.current?.focus(), 10);
     }
   }, [pending]);
+
+  // Esc 键关闭对话
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape" && pending) handleClose();
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [pending, handleClose]);
 
   if (!pending) return null;
 
@@ -67,7 +84,7 @@ export function ChatPanel() {
       <div style={styles.panel}>
         <div style={styles.header}>
           <div style={{ fontWeight: 600 }}>与「{pending.targetName}」对话</div>
-          <button style={styles.close} onClick={() => setPending(null)}>
+          <button style={styles.close} onClick={handleClose}>
             ×
           </button>
         </div>

@@ -33,6 +33,8 @@ interface WorldStore {
     targetId: string;
     targetName: string;
   } | null;
+  /** 正在追踪（自动靠近）的 NPC id；null 表示未追踪 */
+  trackingAgentId: string | null;
 
   // actions
   setPlayer(profile: AgentProfile | null): void;
@@ -50,6 +52,7 @@ interface WorldStore {
   pushEvents(events: WorldEvent[]): void;
   selectAgent(id: string | null): void;
   setPendingDialogue(data: WorldStore["pendingDialogue"]): void;
+  setTrackingAgent(id: string | null): void;
 }
 
 export const useWorldStore = create<WorldStore>((set) => ({
@@ -66,6 +69,7 @@ export const useWorldStore = create<WorldStore>((set) => ({
   selectedAgentId: null,
   playerSceneId: null,
   pendingDialogue: null,
+  trackingAgentId: null,
 
   setPlayer: (profile) =>
     set(() => ({
@@ -124,4 +128,5 @@ export const useWorldStore = create<WorldStore>((set) => ({
     })),
   selectAgent: (id) => set(() => ({ selectedAgentId: id })),
   setPendingDialogue: (data) => set(() => ({ pendingDialogue: data })),
+  setTrackingAgent: (id) => set(() => ({ trackingAgentId: id })),
 }));

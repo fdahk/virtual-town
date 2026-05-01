@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { obsApi } from "../../api";
 import type { TraceBundle } from "../../types/observability";
+import { CopyableTruncatedId } from "./CopyableTruncatedId";
 
 export function TraceDetail({ traceId }: { traceId: string }) {
   const [data, setData] = useState<TraceBundle | null>(null);
@@ -31,7 +32,9 @@ export function TraceDetail({ traceId }: { traceId: string }) {
   return (
     <div style={styles.root}>
       <div style={styles.header}>
-        <div style={styles.traceId}>trace_id: {data.trace_id}</div>
+        <div style={styles.traceId}>
+          trace_id: <CopyableTruncatedId id={data.trace_id} full />
+        </div>
         <div style={{ fontSize: 12, opacity: 0.7 }}>
           events {data.events.length} · llm {data.llm_calls.length} · tool {data.tool_calls.length} · task {data.tasks.length}
         </div>

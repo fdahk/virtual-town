@@ -134,3 +134,15 @@ class PlayerTalkResponse(BaseModel):
     emotion: str | None = None
     memory_ids: list[str] = Field(default_factory=list)
     citations: list[dict[str, Any]] = Field(default_factory=list)
+
+
+class ApproachNpcRequest(BaseModel):
+    """玩家请求靠近某个 NPC，服务端计算路径并加入引擎队列。"""
+
+    npc_id: str
+
+
+class EndChatRequest(BaseModel):
+    """玩家主动关闭对话，释放 NPC 的 CHATTING 状态。"""
+
+    npc_id: str

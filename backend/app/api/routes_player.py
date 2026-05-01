@@ -8,7 +8,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.db.session import get_session
 from app.schemas.agent import (
     AgentProfile,
+    ApproachNpcRequest,
     CreatePlayerRequest,
+    EndChatRequest,
     PlayerInteractRequest,
     PlayerInteractResponse,
     PlayerMoveRequest,
@@ -52,3 +54,19 @@ async def player_talk(
     request: PlayerTalkRequest, session: AsyncSession = Depends(get_session)
 ) -> PlayerTalkResponse:
     return await get_player_service().talk(session, request)
+
+
+@router.post("/me/approach", response_model=PlayerMoveResponse)
+async def approach_npc(
+    request: ApproachNpcRequest, session: AsyncSession = Depends(get_session)
+) -> PlayerMoveResponse:
+    """计算并下发玩家朝目标 NPC 靠近的路径；已在交互半径内时返回 reason='in_range'。"""
+    return await get_player_service().approach_npc(session, request)
+
+
+@router.post("/me/end_chat", response_model=dict)
+async def end_chat(
+    request: EndChatRequest, session: AsyncSession = Depends(get_session)
+) -> dict:
+    """玩家关闭对话界面时调用，释放 NPC 的 CHATTING 状态。"""
+    return await get_player_service().end_chat(session, request)

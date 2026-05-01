@@ -126,6 +126,8 @@ class SimulationEngine:
         # 每个 Agent 上次反思/日结的游戏时间
         self._last_reflect_at: dict[str, datetime] = {}
         self._last_summary_day: dict[str, str] = {}
+        # CHATTING 进入的真实时间戳（用于超时恢复，独立于游戏时间）
+        self._chatting_since_real: dict[str, float] = {}
 
     # ------------------------------------------------------------------
     # 生命周期
@@ -384,8 +386,18 @@ class SimulationEngine:
         for agent in self._agents.values():
             if agent.is_player:
                 continue
-            if agent.state in {"CHATTING", "SLEEPING"}:
+            if agent.state == "SLEEPING":
                 continue
+            if agent.state == "CHATTING":
+                # 超时自动解除：真实时间超过 90 秒后 NPC 恢复自主行动
+                import time as _time
+                since = self._chatting_since_real.get(agent.id)
+                if since is None or (_time.time() - since) > 90.0:
+                    agent.state = "IDLE"
+                    self._chatting_since_real.pop(agent.id, None)
+                    agent.dirty = True
+                else:
+                    continue
             if agent.path:
                 continue
             # 每个 Agent 独立检查自身的决策冷却时间
@@ -801,6 +813,26 @@ class SimulationEngine:
 
     def get_agent(self, agent_id: str) -> EngineAgent | None:
         return self._agents.get(agent_id)
+
+    def start_chatting(self, agent_id: str) -> None:
+        """令指定 Agent 进入 CHATTING 状态并记录开始时间，用于 player talk() 调用时冻结 NPC。"""
+        import time as _time
+
+        agent = self._agents.get(agent_id)
+        if agent is not None:
+            agent.state = "CHATTING"
+            agent.path = []
+            agent.dirty = True
+        self._chatting_since_real[agent_id] = _time.time()
+
+    def end_chatting(self, agent_id: str) -> None:
+        """主动结束 CHATTING，让 NPC 恢复自主决策。"""
+        agent = self._agents.get(agent_id)
+        if agent is not None and agent.state == "CHATTING":
+            agent.state = "IDLE"
+            agent.last_decision_at = None
+            agent.dirty = True
+        self._chatting_since_real.pop(agent_id, None)
 
     def find_agent_by_name(self, name: str) -> EngineAgent | None:
         for a in self._agents.values():
