@@ -67,7 +67,8 @@ class Settings(BaseSettings):
 
     # 仿真
     simulation_world_tick_hz: float = Field(default=5.0)
-    simulation_ai_tick_minutes: int = Field(default=5)
+    # 阶段 19+++ 调参：5 → 3，让 NPC 决策更频繁、社交反应更灵
+    simulation_ai_tick_minutes: int = Field(default=3)
     simulation_speed_default: float = Field(default=1.0)
     simulation_autostart: bool = Field(default=True)
     # 异步任务队列（阶段 12 — Redis + RQ）
@@ -108,7 +109,8 @@ class Settings(BaseSettings):
     # 阶段 19：社会化升级（请求-同意-拒绝 + NPC-NPC 自主社交）
     # 当 social_need ≥ 该阈值（0..100 标度，对应 AgentState.social_need * 100）时，
     # NPC 决策会优先尝试发起社交请求。
-    social_need_trigger_threshold: int = Field(default=55)
+    # 阶段 19+++ 调参：55 → 40，让 NPC 更早觉得"该社交了"。
+    social_need_trigger_threshold: int = Field(default=40)
     # NPC-NPC 对话最多轮次（每轮包含 A 说 + B 回，每方最多 10 次发言）
     npc_dialog_max_turns: int = Field(default=10)
     # 请求 pending 超时（秒）：超过该时长 target 没响应 → 自动 expired
@@ -129,20 +131,26 @@ class Settings(BaseSettings):
     memory_projection_default_debounce_minutes: int = Field(default=30)
 
     # 阶段 19+：基础需求自然演化（每仿真分钟的增量；0 表示不演化）
-    # social_need 满 = 1.0；阈值默认 0.55，意味着大约 6 小时游戏时间从 0.3 升到 0.55
-    needs_social_growth_per_minute: float = Field(default=0.0010)
+    # 阶段 19+++ 调参：0.0010 → 0.0030（3x），新阈值 0.40 ≈ 130 仿真分钟
+    # 即从早 8 点不社交到下午 10 点会强烈想找人，与现实节奏接近。
+    needs_social_growth_per_minute: float = Field(default=0.0030)
     # hunger / energy 也跟随时间演化，让 have_meal / rest_at 也有自然驱动力
-    needs_hunger_growth_per_minute: float = Field(default=0.0008)
-    needs_energy_decay_per_minute: float = Field(default=0.0005)
+    # 阶段 19+++ 调参：0.0008 → 0.0020，让 NPC 一天大约 3-4 次有明显饥饿感
+    needs_hunger_growth_per_minute: float = Field(default=0.0020)
+    # 阶段 19+++ 调参：0.0005 → 0.0015，让 NPC 一天会想休息几次
+    needs_energy_decay_per_minute: float = Field(default=0.0015)
     # 单次社交完成后社交需求衰减比例（last_social_at 更新时一次性扣）
     needs_social_decay_after_chat: float = Field(default=0.55)
     # 引擎层"自主社交邂逅"扫描间隔（仿真分钟）：两个空闲 NPC 走得近 + 一方
     # social_need 高时，自动触发 request_interaction
-    social_encounter_scan_minutes: int = Field(default=5)
+    # 阶段 19+++ 调参：5 → 2，让自然邂逅出现得更频繁
+    social_encounter_scan_minutes: int = Field(default=2)
     # 邂逅触发的最大曼哈顿距离
-    social_encounter_distance: int = Field(default=3)
+    # 阶段 19+++ 调参：3 → 5，覆盖更大的"擦肩而过"范围
+    social_encounter_distance: int = Field(default=5)
     # 邂逅触发后该 NPC 在多少仿真分钟内不再主动邂逅别人
-    social_encounter_cooldown_minutes: int = Field(default=20)
+    # 阶段 19+++ 调参：20 → 10，避免冷却期过长冷场
+    social_encounter_cooldown_minutes: int = Field(default=10)
 
     @field_validator("backend_cors_origins")
     @classmethod
