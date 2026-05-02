@@ -29,6 +29,10 @@ logger = get_logger(__name__)
 
 SHORT_TERM_IMPORTANCE_PROMOTE_THRESHOLD = 7
 
+# 阶段 20：working scope（30 仿真分钟）也走 TTL 流转。
+# 过期后一律 archived（不会升级），让 consolidation worker 后续合并。
+WORKING_SCOPES_TO_REAP: tuple[str, ...] = ("short_term", "working")
+
 
 class TTLCleanupWorker:
     def __init__(
@@ -79,7 +83,7 @@ class TTLCleanupWorker:
             stmt = (
                 select(Memory)
                 .where(
-                    Memory.scope == "short_term",
+                    Memory.scope.in_(WORKING_SCOPES_TO_REAP),
                     Memory.ttl_expires_at.is_not(None),
                     Memory.ttl_expires_at < now,
                 )
@@ -87,12 +91,16 @@ class TTLCleanupWorker:
             )
             rows = (await session.execute(stmt)).scalars().all()
             for mem in rows:
-                if (mem.importance or 0) >= SHORT_TERM_IMPORTANCE_PROMOTE_THRESHOLD:
+                # working scope 不升级长期，仅过期为 archived，留给 consolidation 合并；
+                # short_term 仍按 importance>=7 升级长期。
+                if (
+                    mem.scope == "short_term"
+                    and (mem.importance or 0) >= SHORT_TERM_IMPORTANCE_PROMOTE_THRESHOLD
+                ):
                     mem.scope = "long_term"
                     mem.ttl_expires_at = None
                     promoted += 1
                 else:
-                    # 短期记忆已过期，置 scope = archived 由业务决定是否清理
                     mem.scope = "archived"
                     expired += 1
             if rows:

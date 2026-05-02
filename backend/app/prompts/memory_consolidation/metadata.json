@@ -1,0 +1,8 @@
+{
+  "id": "memory_consolidation",
+  "version": "v1",
+  "expected_schema": "MemoryConsolidationOutput",
+  "model_role": "reasoning",
+  "last_updated": "2026-05-02",
+  "description": "把同主题的低重要度 archived 记忆合并成一条 long_term summary。"
+}

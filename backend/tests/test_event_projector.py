@@ -103,18 +103,19 @@ async def test_no_actor_skipped(memory_writes):
 
 @pytest.mark.asyncio
 async def test_default_threshold_filters_low_importance(memory_writes):
-    # nature.fruit_rotted 不在白名单 → 走默认阈值 4
+    # 阶段 20：默认阈值降到 2。importance=1 才会被丢。
     payload = {
         "event_type": "nature.fruit_rotted",
         "actor_entity_id": "npc1",
         "description": "果实变质了",
-        "importance": 2,
+        "importance": 1,
     }
     await project_world_event_to_memory(payload)
     assert memory_writes == []
 
-    # importance ≥ 4 时投影成 thought
-    payload["importance"] = 5
+    # importance ≥ 2 即写入 thought
+    payload["importance"] = 2
+    payload["target_entity_id"] = "obj_fruit_a"  # 让 debounce key 不同
     await project_world_event_to_memory(payload)
     assert len(memory_writes) == 1
     assert memory_writes[0]["memory_type"] == "thought"
@@ -133,6 +134,56 @@ async def test_debounce_skips_repeated_event(memory_writes):
     await project_world_event_to_memory(payload)
     await project_world_event_to_memory(payload)
     assert len(memory_writes) == 1
+
+
+@pytest.mark.asyncio
+async def test_low_importance_uses_working_scope(monkeypatch):
+    """阶段 20：importance < 4 的事件投影时应该走 working scope；≥4 进 short_term。"""
+    captured: list[dict[str, Any]] = []
+
+    class _FakeMS:
+        async def write(self, _session, **kwargs):
+            captured.append(kwargs)
+            return MagicMock(id="m1")
+
+    fake_session = MagicMock()
+    fake_session.get = AsyncMock(return_value=MagicMock(id="npc1", name="小明"))
+
+    class _FakeFactory:
+        def __call__(self):
+            ctx = MagicMock()
+            ctx.__aenter__ = AsyncMock(return_value=fake_session)
+            ctx.__aexit__ = AsyncMock(return_value=None)
+            return ctx
+
+    monkeypatch.setattr(
+        "app.services.memory_service.get_memory_service", lambda: _FakeMS()
+    )
+    monkeypatch.setattr(
+        "app.db.session.get_session_factory", lambda: _FakeFactory()
+    )
+    monkeypatch.setattr(event_projector, "_claim_debounce", _passthrough_debounce)
+
+    # 低 importance 走白名单 base_importance（world.scene_changed=2）→ working
+    await project_world_event_to_memory({
+        "event_type": "world.scene_changed",
+        "actor_entity_id": "npc1",
+        "target_entity_id": "loc_x",
+        "description": "我换到了广场",
+        "importance": 2,
+    })
+    assert captured, "scope=2 应该被投影"
+    assert captured[-1]["scope"] == "working"
+
+    # 高 importance（hazard 白名单 base=7）→ short_term
+    await project_world_event_to_memory({
+        "event_type": "world.hazard_triggered",
+        "actor_entity_id": "npc1",
+        "target_entity_id": "loc_y",
+        "description": "我撞到了硬物",
+        "importance": 7,
+    })
+    assert captured[-1]["scope"] == "short_term"
 
 
 @pytest.mark.asyncio

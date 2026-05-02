@@ -81,9 +81,14 @@
 
 - query = "附近实体名拼接" 或 "今天要做什么"。
 - `MemoryService.search` 走 pgvector + importance + recency 三因素排序，取 top-6。
-- 时间衰减：`forgetting_curve(now - last_accessed_at)`。
-- 关键改动（阶段 19++）：`event_projector` 把感兴趣的 `WorldEvent` 自动投影成
-  agent 自己的记忆，让"看到的事"立刻能被检索到。
+- 默认检索覆盖 **`working` / `short_term` / `long_term`**；`archived` 与
+  `consolidated` 不进默认集合（详见 §10）。
+- **访问强化**（阶段 20）：search 命中即刷新 `last_accessed_at`；
+  `recency = max(exp(-Δ_created/168h), exp(-Δ_accessed/24h))`，
+  常被回忆的旧记忆继续保持高分。
+- **事件投影**（阶段 19++ / 20）：`event_projector` 把所有有 actor 的 `WorldEvent`
+  按 importance 投影到该 actor 的记忆里：≥4 进 `short_term`，2-3 进 `working`
+  （30 分钟过期）。让"看到的事"立刻能被检索到。
 
 ### 2.3 Plan（结构化输出）
 
@@ -299,12 +304,17 @@ key：`agent:{agent_id}:unreachable`（Redis SET，TTL 300s）
 | `INTERACTION_HIGH_PRIORITY_THRESHOLD` | 8 | 高优先级（≥ 此值）任务硬拒打扰。降低 → NPC 更容易被打断。 |
 | `SOCIAL_COOLDOWN_AFTER_REFUSAL_MINUTES` | 30 | 连续硬拒后冷却。越小越容易"被骚扰"，越大保护"我说过不"。 |
 
-### 7.5 记忆投影
+### 7.5 记忆投影 / 合并 / 沉思（阶段 20）
 
 | 参数 | 默认 | 影响 |
 |------|------|------|
-| `MEMORY_PROJECTION_DEFAULT_MIN_IMPORTANCE` | 4 | 不在白名单事件需 ≥ 此重要度才落记忆。降低 → 更多事件能影响后续决策。 |
+| `MEMORY_PROJECTION_DEFAULT_MIN_IMPORTANCE` | **2** | 不在白名单事件需 ≥ 此重要度才落记忆（阶段 20：4→2）。降低 → 更多事件能影响决策。 |
 | `MEMORY_PROJECTION_DEFAULT_DEBOUNCE_MINUTES` | 30 | 同 (actor, type, target) 的去重窗口。 |
+| `MEMORY_DIALOGUE_PER_MESSAGE` | true | 对话每条消息都为参与者写一条 chat 记忆（working scope）。 |
+| `MEMORY_CONSOLIDATION_ENABLED` | true | 每仿真日合并低重要度 archived 记忆为 long_term summary。 |
+| `MEMORY_CONSOLIDATION_MIN_BUCKET_SIZE` | 3 | 主题桶 ≥ 此条数才触发 LLM 合并（避免过碎）。 |
+| `MEMORY_RUMINATION_ENABLED` | true | 每个 NPC 每仿真日抽样重要长期记忆产生新 thought。 |
+| `MEMORY_RUMINATION_IMPORTANCE_THRESHOLD` | 7 | 沉思候选记忆的最低重要度。 |
 
 ## 8. Prompt 调优要点
 
@@ -349,7 +359,41 @@ NPC 反复 stuck 在 "无路通往目标场景"？
 2. 看 `Portal` 表：当前场景到目标场景是否有任何 portal 链。
 3. 多跳 BFS 默认最多 4 跳；超过需要修改 `rule_agent._find_inter_scene_route`。
 
-## 10. 关键文件索引
+## 10. 记忆生命周期（阶段 20）
+
+> 详见专题：[`docs/实施方案/记忆系统重构方案.md`](../实施方案/记忆系统重构方案.md)。
+
+```text
+            投影 / 工具写入 / 对话每条消息
+                    │
+   importance ≥ 4  ▼   importance < 4
+   ┌──────── short_term ─────────┐  ┌─── working ───┐
+   │  TTL 24 仿真小时             │  │ TTL 30 分钟    │
+   └─────────────┬────────────────┘  └────────┬──────┘
+       importance ≥ 7│ <7 / working                │ TTL 过期
+                     ▼                            ▼
+                long_term                     archived
+                                                  │ 每仿真日 22:00
+                                                  ▼
+                                       memory_consolidation
+                                                  │ 同主题 ≥3 条
+                                                  ▼
+                                       long_term summary
+                                       原文 → consolidated
+                                       summarized_into_id 指向 summary
+                ▲
+                │ memory_rumination：每 NPC 每 24 仿真小时
+                │ 抽样 importance≥7 的长期记忆 → LLM 重新感悟 → thought
+                │ 同时给原记忆 importance+1 + 刷新 last_accessed_at
+```
+
+**关键设计**：
+
+- **没有任何记忆会被物理删除**。"遗忘" = 退出默认检索（`archived` / `consolidated`）。
+- **summary 永远可追溯**：通过 `evidence_memory_ids` 链回原文（即 `summarized_into_id` 指向 summary 的那一批）。
+- **访问强化**：search 命中即刷 `last_accessed_at`，`recency` 取 `max(创建半衰=168h, 访问半衰=24h)`，让被频繁回忆的旧记忆继续保持高分。
+
+## 11. 关键文件索引
 
 | 文件 | 作用 |
 |------|------|
@@ -363,5 +407,9 @@ NPC 反复 stuck 在 "无路通往目标场景"？
 | `backend/app/domain/dialogue/interaction_evaluator.py` | 请求-同意-拒绝 评估 |
 | `backend/app/domain/dialogue/npc_dialogue_loop.py` | NPC-NPC 对话循环 |
 | `backend/app/domain/memory/event_projector.py` | WorldEvent → 个人记忆投影 |
+| `backend/app/domain/memory/consolidation.py` | 阶段 20：archived → long_term summary 合并 |
+| `backend/app/domain/memory/rumination.py` | 阶段 20：重要长期记忆抽样沉思 |
+| `backend/app/domain/memory/reflection.py` | 反思 + 日结 |
+| `backend/app/services/memory_service.py` | write / search / 访问强化 |
 | `backend/app/services/interaction_service.py` | 交互请求生命周期管理 |
 | `backend/app/core/config.py` | 所有可调参数集中定义 |

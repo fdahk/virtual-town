@@ -19,7 +19,7 @@ from typing import Iterable
 
 from datetime import timedelta
 
-from sqlalchemy import desc, select
+from sqlalchemy import desc, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.logging import get_logger
@@ -35,6 +35,8 @@ from app.schemas.memory import (
 )
 
 SHORT_TERM_TTL_SECONDS = 3600 * 24  # 24 小时（与方案 §5 对齐）
+# 阶段 20：working scope 30 分钟过期（承接低重要度"鸡毛蒜皮"事件 / 对话每条消息）
+WORKING_TTL_SECONDS = 60 * 30
 
 logger = get_logger(__name__)
 
@@ -43,6 +45,10 @@ IMPORTANCE_WEIGHT = 3.0
 RELEVANCE_WEIGHT = 2.0
 
 RECENCY_HALF_LIFE_HOURS = 24
+# 阶段 20：访问强化半衰期。被频繁回忆的旧记忆继续保持高 recency 分。
+# recency = max(exp(-Δ_created/168h), exp(-Δ_accessed/24h))
+ACCESS_HALF_LIFE_HOURS = 24
+LONG_HALF_LIFE_HOURS = 168  # 7 天
 
 
 def _tokenize(text: str) -> list[str]:
@@ -83,9 +89,22 @@ def _cosine(a: Iterable[float], b: Iterable[float]) -> float:
     return dot / (na * nb)
 
 
-def _recency_score(created_at: datetime, now: datetime) -> float:
-    delta_hours = max((now - created_at).total_seconds() / 3600.0, 0.0)
-    return math.exp(-delta_hours / RECENCY_HALF_LIFE_HOURS)
+def _recency_score(
+    created_at: datetime, now: datetime, last_accessed_at: datetime | None = None
+) -> float:
+    """阶段 20：组合 recency。
+
+    - 创建时间维度：长半衰期（7 天），新记忆自然衰减但不至于一天就归零；
+    - 访问时间维度：短半衰期（24 小时），被频繁回忆的旧记忆继续保持高分。
+    返回两个维度的最大值。
+    """
+    delta_created_h = max((now - created_at).total_seconds() / 3600.0, 0.0)
+    base = math.exp(-delta_created_h / LONG_HALF_LIFE_HOURS)
+    if last_accessed_at is None:
+        return base
+    delta_acc_h = max((now - last_accessed_at).total_seconds() / 3600.0, 0.0)
+    accessed = math.exp(-delta_acc_h / ACCESS_HALF_LIFE_HOURS)
+    return max(base, accessed)
 
 
 def _importance_score(importance: int) -> float:
@@ -116,6 +135,9 @@ class MemoryService:
         ttl_expires_at = None
         if scope == "short_term":
             ttl_expires_at = now + timedelta(seconds=SHORT_TERM_TTL_SECONDS)
+        elif scope == "working":
+            # 阶段 20：working scope 走 30 仿真分钟 TTL，过期后变 archived。
+            ttl_expires_at = now + timedelta(seconds=WORKING_TTL_SECONDS)
         mem = Memory(
             agent_id=agent_id,
             memory_type=memory_type,
@@ -232,7 +254,7 @@ class MemoryService:
         scored: list[MemorySearchResult] = []
         for mem in rows:
             importance = _importance_score(mem.importance)
-            recency = _recency_score(mem.created_at, now)
+            recency = _recency_score(mem.created_at, now, mem.last_accessed_at)
             if query_vec is not None and mem.embedding is not None:
                 relevance = _cosine(query_vec, list(mem.embedding))
             else:
@@ -255,7 +277,33 @@ class MemoryService:
             )
 
         scored.sort(key=lambda r: r.score, reverse=True)
-        return scored[: request.limit]
+        top = scored[: request.limit]
+
+        # 阶段 20：访问强化——命中即刷新 last_accessed_at。
+        # 用独立 session 提交，避免依赖上层是否 commit（很多只读检索路径不会 commit）。
+        if top:
+            await self._stamp_access(top, now)
+        return top
+
+    async def _stamp_access(
+        self, results: list[MemorySearchResult], now: datetime
+    ) -> None:
+        """用独立 session 把命中记忆的 last_accessed_at 更新到 now。
+
+        独立 session：检索路径不再被强制 commit；同时支持 HTTP 只读端点。
+        """
+        try:
+            from app.db.session import get_session_factory
+
+            factory = get_session_factory()
+            hit_ids = [r.memory.id for r in results]
+            async with factory() as access_session:
+                await access_session.execute(
+                    update(Memory).where(Memory.id.in_(hit_ids)).values(last_accessed_at=now)
+                )
+                await access_session.commit()
+        except Exception:
+            logger.debug("update last_accessed_at failed", exc_info=True)
 
 
 _memory_service: MemoryService | None = None

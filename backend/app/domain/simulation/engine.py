@@ -168,6 +168,9 @@ class SimulationEngine:
         self._world_time: datetime = utcnow()
         # 每个 Agent 上次反思/日结的游戏时间
         self._last_reflect_at: dict[str, datetime] = {}
+        # 阶段 20：consolidation / rumination 错峰入队的 last-time
+        self._last_consolidation_at: dict[str, datetime] = {}
+        self._last_rumination_at: dict[str, datetime] = {}
         self._last_summary_day: dict[str, str] = {}
         # CHATTING 进入的真实时间戳（用于超时恢复，独立于游戏时间）
         self._chatting_since_real: dict[str, float] = {}
@@ -1849,6 +1852,66 @@ class SimulationEngine:
                 self._last_summary_day[agent.id] = day_key
             except Exception:
                 logger.debug("enqueue daily_reflection(summary) failed for %s", agent.id, exc_info=True)
+
+        # 阶段 20：每仿真日为每个 NPC 入队 consolidation / rumination 各 1 次。
+        # consolidation 与 rumination 用不同 idempotency_extra，错开 12 仿真小时
+        # （consolidation 用日期 day_key，rumination 用 day_key+'-r'），不会互相阻塞。
+        settings = get_settings()
+        for agent in self._agents.values():
+            if agent.is_player:
+                continue
+            # consolidation：每仿真日 1 次，22:00 后才入队（确保大部分 archived 已存在）
+            if (
+                settings.memory_consolidation_enabled
+                and now_dt.hour >= 22
+                and self._last_consolidation_at.get(agent.id, datetime.min).strftime("%Y-%m-%d")
+                != day_key
+            ):
+                try:
+                    await queue.enqueue(
+                        task_type="memory_consolidation",
+                        payload={
+                            "agent_id": agent.id,
+                            "world_time": now_dt.isoformat(),
+                        },
+                        entity_id=agent.id,
+                        simulation_id=self._sim_id(),
+                        idempotency_extra=f"consolidate:{day_key}",
+                        simulation_step=self._step,
+                        priority=9,  # low 队列优先级低于反思
+                        deadline_seconds=180.0,
+                    )
+                    self._last_consolidation_at[agent.id] = now_dt
+                except Exception:
+                    logger.debug(
+                        "enqueue memory_consolidation failed for %s", agent.id, exc_info=True
+                    )
+            # rumination：每仿真日 1 次，10:00 - 14:00 之间入队（白天回想）
+            if (
+                settings.memory_rumination_enabled
+                and 10 <= now_dt.hour < 14
+                and self._last_rumination_at.get(agent.id, datetime.min).strftime("%Y-%m-%d")
+                != day_key
+            ):
+                try:
+                    await queue.enqueue(
+                        task_type="memory_rumination",
+                        payload={
+                            "agent_id": agent.id,
+                            "world_time": now_dt.isoformat(),
+                        },
+                        entity_id=agent.id,
+                        simulation_id=self._sim_id(),
+                        idempotency_extra=f"ruminate:{day_key}",
+                        simulation_step=self._step,
+                        priority=9,
+                        deadline_seconds=180.0,
+                    )
+                    self._last_rumination_at[agent.id] = now_dt
+                except Exception:
+                    logger.debug(
+                        "enqueue memory_rumination failed for %s", agent.id, exc_info=True
+                    )
 
 
 class _ORMStateView:

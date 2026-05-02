@@ -325,11 +325,16 @@ class Memory(Base):
     __table_args__ = (
         Index("ix_memories_agent_created", "agent_id", "created_at"),
         Index("ix_memories_agent_scope", "agent_id", "scope"),
+        Index("ix_memories_summarized_into", "summarized_into_id"),
     )
 
     id: Mapped[str] = mapped_column(String(64), primary_key=True, default=_uuid)
     agent_id: Mapped[str] = mapped_column(ForeignKey("agents.id", ondelete="CASCADE"), nullable=False)
     memory_type: Mapped[str] = mapped_column(String(16), nullable=False)
+    # 阶段 20：scope 取值集合扩展为
+    #   working / short_term / long_term / archived / consolidated
+    # 其中 consolidated 表示该条已被某条 summary（long_term）合并，仅作为证据存在；
+    # 默认检索只覆盖前三类。
     scope: Mapped[str] = mapped_column(String(16), nullable=False, default="short_term")
     subject: Mapped[str | None] = mapped_column(String(128), nullable=True)
     predicate: Mapped[str | None] = mapped_column(String(128), nullable=True)
@@ -349,6 +354,9 @@ class Memory(Base):
     )
     last_accessed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     ttl_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # 阶段 20：被合并到的 summary memory.id；非 NULL 即代表"已被合并"。
+    # consolidation worker 每天把 archived 同主题 ≥3 条合并成 summary 后回填。
+    summarized_into_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
 
 
 # ---------------------------------------------------------------------------

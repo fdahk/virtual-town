@@ -1,5 +1,5 @@
 """
-阶段 19++：世界事件 → 记忆投影器。
+阶段 19++ / 20：世界事件 → 记忆投影器。
 
 让 NPC"看见的"事情被持久化为记忆，从而被后续 ``MemoryService.search`` 召回，
 影响 LLM 决策与对话上下文。
@@ -14,19 +14,12 @@
    Redis 不可用时回落到进程内 dict（best-effort）。
 5. 写入失败一律吞掉异常（不阻塞引擎广播链路）。
 
-记忆类型映射
-------------
-- ``world.sign_noticed`` → ``event``，importance=4，关键词含告示牌内容前几个词。
-- ``world.storm_warning`` → ``event``，importance=6。
-- ``world.scene_changed`` → ``event``，importance=2（去重力度大）。
-- ``world.hazard_triggered`` → ``event``，importance=7。
-- ``nature.fish_caught`` / ``nature.fruit_picked`` / ``nature.mushroom_picked``
-  → ``event``，importance=3。
-- ``world.fire_started`` / ``world.fire_extinguished`` → ``event``，importance=5。
-- ``interaction.accepted`` / ``interaction.declined``：跳过（``request_interaction``
-  / ``socialize`` 工具自身已写记忆候选）。
-- ``agent.action_started`` / ``agent.action_finished``：跳过（高频，非感知事件）。
-- 其余类型：``importance >= 4`` 才写入，``thought`` 类型。
+记忆分层（阶段 20）
+-------------------
+- importance ≥ 4 的事件 → ``short_term`` scope（24 小时过期，进默认检索）。
+- importance < 4 的事件 → ``working`` scope（30 分钟过期，进默认检索但快速归零）。
+- importance < ``MEMORY_PROJECTION_DEFAULT_MIN_IMPORTANCE`` 的非白名单事件直接丢弃，
+  避免把每一个 tick 的鸡毛蒜皮全堆进 DB（仍可通过调低配置接收）。
 """
 
 from __future__ import annotations
@@ -80,6 +73,10 @@ _BLOCK_EVENT_TYPES: frozenset[str] = frozenset({
 })
 
 _DEFAULT_MEMORY_TYPE = "thought"
+
+# 阶段 20：低重要度走 working scope（30 分钟自动过期，承接"鸡毛蒜皮"）；
+# 高重要度才占用 short_term 的 24 小时档位。
+_WORKING_SCOPE_THRESHOLD = 4
 
 # 进程内 fallback debounce（Redis 不可用时使用）
 _INPROC_DEBOUNCE: dict[str, datetime] = {}
@@ -177,7 +174,9 @@ async def _write_memory(
             if name:
                 kw.append(name)
 
-        # 一致的 importance 计算（让正反馈/惊讶/情绪扣分都过一遍）
+        # importance 计算：以白名单 / hint 给的值为主导，让 compute_importance 的
+        # detail 仅作为可解释明细。这样"路人擦肩而过"不会因 first-person novelty
+        # 加分被拉到 5；相反真正稀有的事件由调用方 hint 控制。
         try:
             calc = compute_importance(
                 ImportanceContext(
@@ -186,18 +185,19 @@ async def _write_memory(
                     extras={"source": f"world_event:{event_type}"},
                 )
             )
-            final_importance = max(calc.importance, max(1, min(importance, 10)))
             importance_detail = calc.detail
         except Exception:
-            final_importance = max(1, min(importance, 10))
             importance_detail = None
+        final_importance = max(1, min(importance, 10))
 
+        # 阶段 20：低 importance 走 working scope（30 分钟），高 importance 才进 short_term。
+        scope = "short_term" if final_importance >= _WORKING_SCOPE_THRESHOLD else "working"
         ms = get_memory_service()
         await ms.write(
             session,
             agent_id=actor_id,
             memory_type=memory_type if memory_type in {"event", "thought", "chat", "summary"} else "event",
-            scope="short_term",
+            scope=scope,
             description=description[:320],
             importance=final_importance,
             importance_detail=importance_detail or {},

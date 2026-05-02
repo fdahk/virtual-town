@@ -206,6 +206,18 @@ async def run_npc_dialogue(
                     text=line_output.line,
                     emotion=line_output.emotion,
                 )
+
+                # 阶段 20：开关启用时，对话每条消息也为双方各写一条 chat 记忆。
+                # 走 working scope（30 分钟过期）—— 留在短期上下文里方便决策"刚说了什么"。
+                # importance 较低，TTL 过期后由 consolidation 合并成主题摘要。
+                if settings.memory_dialogue_per_message:
+                    await _write_per_message_memories(
+                        session,
+                        speaker=me,
+                        listener=other,
+                        line=line_output.line,
+                        emotion=line_output.emotion,
+                    )
                 await session.commit()
                 await _broadcast_message(
                     simulation_id=simulation_id,
@@ -361,6 +373,56 @@ def _rule_line(
         emotion="neutral",
         end_chat=False,
     )
+
+
+async def _write_per_message_memories(
+    session: AsyncSession,
+    *,
+    speaker: Agent,
+    listener: Agent,
+    line: str,
+    emotion: str | None,
+) -> None:
+    """阶段 20：对话每条消息都让双方各写一条 chat 记忆（working scope）。
+
+    - 主语视角："我对 listener 说：xxx"
+    - 客语视角："听 speaker 说：xxx"
+    importance=2 / scope=working：30 分钟内决策可拿到"刚刚的对话"，过期后由
+    consolidation 合并成"今天和 X 聊了什么"的主题摘要。
+    """
+    if not line.strip():
+        return
+    ms = get_memory_service()
+    line_short = line[:200]
+    try:
+        await ms.write(
+            session,
+            agent_id=speaker.id,
+            memory_type="chat",
+            scope="working",
+            description=f"我对{listener.name}说：{line_short}",
+            importance=2,
+            subject=speaker.name,
+            predicate="said_to",
+            object_=listener.name,
+            keywords=[listener.name, "chat", emotion or ""][:8],
+            commit=False,
+        )
+        await ms.write(
+            session,
+            agent_id=listener.id,
+            memory_type="chat",
+            scope="working",
+            description=f"听{speaker.name}说：{line_short}",
+            importance=2,
+            subject=speaker.name,
+            predicate="said_to",
+            object_=listener.name,
+            keywords=[speaker.name, "chat", emotion or ""][:8],
+            commit=False,
+        )
+    except Exception:
+        logger.debug("per-message memory write failed", exc_info=True)
 
 
 async def _persist_message(

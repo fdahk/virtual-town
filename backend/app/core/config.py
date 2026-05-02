@@ -126,9 +126,27 @@ class Settings(BaseSettings):
     # 设为 False 可彻底关闭事件→记忆投影（如压测时减负）
     memory_projection_enabled: bool = Field(default=True)
     # 不在白名单内的事件，importance ≥ 此阈值才投影成记忆
-    memory_projection_default_min_importance: int = Field(default=4)
+    # 阶段 20：默认 4 → 2，让所有有明确归属的事件都至少进 working scope（30 分钟）。
+    # 想完全不投影的事件请加进 _BLOCK_EVENT_TYPES 黑名单。
+    memory_projection_default_min_importance: int = Field(default=2)
     # 同一 (actor, event_type, target) 组合的默认去重窗口（仿真分钟）
     memory_projection_default_debounce_minutes: int = Field(default=30)
+
+    # 阶段 20：记忆系统重构
+    # consolidation worker 是否启用：每仿真日按主题合并低 importance archived 记忆
+    memory_consolidation_enabled: bool = Field(default=True)
+    # 单个主题桶 ≥ 此条数才触发合并（避免太碎的桶产出无价值 summary）
+    memory_consolidation_min_bucket_size: int = Field(default=3)
+    # 每次合并扫描的"过去 N 仿真天"窗口
+    memory_consolidation_lookback_days: int = Field(default=7)
+    # rumination worker 是否启用：每个 NPC 24 仿真小时回顾重要记忆
+    memory_rumination_enabled: bool = Field(default=True)
+    # 触发沉思的最小重要度阈值（≥ 此值的长期记忆才会被回顾）
+    memory_rumination_importance_threshold: int = Field(default=7)
+    # 单次沉思最多抽取多少条候选记忆
+    memory_rumination_sample_size: int = Field(default=5)
+    # 对话中每条消息是否都为参与者写一条 chat 记忆（关掉则只在 wrap_up 写一条）
+    memory_dialogue_per_message: bool = Field(default=True)
 
     # 阶段 19+：基础需求自然演化（每仿真分钟的增量；0 表示不演化）
     # 阶段 19+++ 调参：0.0010 → 0.0030（3x），新阈值 0.40 ≈ 130 仿真分钟

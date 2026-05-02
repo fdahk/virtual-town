@@ -1,0 +1,8 @@
+{
+  "id": "memory_rumination",
+  "version": "v1",
+  "expected_schema": "MemoryRuminationOutput",
+  "model_role": "reasoning",
+  "last_updated": "2026-05-02",
+  "description": "周期性沉思：抽样重要长期记忆产生新感悟，并强化原记忆。"
+}

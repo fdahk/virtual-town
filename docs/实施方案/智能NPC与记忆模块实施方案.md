@@ -139,22 +139,64 @@
 
 ---
 
-## 5. 记忆分层
+## 5. 记忆分层（阶段 20 重构）
 
-| 层级 | 存储 | 生命周期 | 内容 |
-|------|------|----------|------|
-| Working Context | 进程内 | 当前决策 | 当前感知、当前目标、可用工具 |
-| Short-term Memory | Redis | 10 分钟-24 小时 | 最近看见的人、刚发生的事件、当前对话 |
-| Long-term Memory | PostgreSQL | 长期 | 重要事件、关系、承诺、偏好 |
-| Semantic Memory | pgvector | 长期 | 可语义召回的事件、对话、总结 |
-| Daily Summary | PostgreSQL | 每天生成 | 一天经历总结、遗忘后的摘要 |
+> 详见专题：[`docs/实施方案/记忆系统重构方案.md`](./记忆系统重构方案.md)
 
-### 5.1 遗忘规则
+| scope | 存储 | TTL | 默认检索包含 | 用途 |
+|-------|------|-----|--------------|------|
+| `working` | Postgres + Redis 镜像 | **30 仿真分钟** | ✅ | "鸡毛蒜皮"事件、对话每条消息（importance 1-3） |
+| `short_term` | Postgres + Redis 镜像 | **24 仿真小时** | ✅ | 业务主入口（importance ≥ 4） |
+| `long_term` | PostgreSQL + pgvector | ∞ | ✅ | 重要事件、反思 thought、日结 summary、合并 summary、沉思 thought |
+| `archived` | PostgreSQL | ∞ | ❌ | TTL 过期但还没被合并；等 consolidation worker 处理 |
+| `consolidated` | PostgreSQL | ∞ | ❌ | 已被某条 long_term summary 收录，仅作证据；通过 `summarized_into_id` 反向查到 |
 
-1. 低重要度短期事件过期后直接删除。
-2. 中重要度事件在一天结束时压缩进 Daily Summary。
-3. 高重要度事件保留为长期记忆。
-4. 与关系变化相关的事件同步更新 Relationship。
+### 5.1 生命周期与"非破坏性遗忘"
+
+阶段 20 起，**没有任何记忆会被物理删除**——遗忘 = 退出默认检索集合。
+
+```text
+write → working / short_term
+   │
+   │ TTL 过期（ttl_worker 每 60 秒扫描）
+   ▼
+   ├─ short_term + importance ≥ 7 → long_term（保留原文）
+   └─ 其它 → archived（不进默认检索，但留作证据）
+                │
+                │ 每仿真日 22:00：memory_consolidation 任务
+                ▼
+        按主题（keywords[0]/subject）分桶 → 每桶 ≥3 条 → LLM 合并
+                ↓
+     long_term summary 记忆（importance ≤ 5，evidence_memory_ids 链回原文）
+                ↓
+        原文 scope = consolidated；summarized_into_id = summary.id
+```
+
+每仿真日 12:00 左右：**memory_rumination** 任务给每个 NPC 抽样 ≤5 条
+`importance ≥ 7` 的长期记忆，让 LLM 重新感悟产生新的 `thought` 记忆，
+并把原记忆 `importance += 1`（cap 10）+ 刷新 `last_accessed_at`。
+
+`MemoryService.search` 命中后会刷新 `last_accessed_at`；
+`_recency_score` 取 `max(exp(-Δ_created/168h), exp(-Δ_accessed/24h))`，
+**频繁被回忆的旧记忆继续保持高 recency 权重**。
+
+### 5.2 调参开关
+
+```dotenv
+# 投影器（让所有事件都进记忆）
+MEMORY_PROJECTION_ENABLED=true
+MEMORY_PROJECTION_DEFAULT_MIN_IMPORTANCE=2   # 阶段 20：4 → 2
+# 合并
+MEMORY_CONSOLIDATION_ENABLED=true
+MEMORY_CONSOLIDATION_MIN_BUCKET_SIZE=3
+MEMORY_CONSOLIDATION_LOOKBACK_DAYS=7
+# 沉思
+MEMORY_RUMINATION_ENABLED=true
+MEMORY_RUMINATION_IMPORTANCE_THRESHOLD=7
+MEMORY_RUMINATION_SAMPLE_SIZE=5
+# 对话每条消息都进记忆（关掉则只在 wrap_up 写一条）
+MEMORY_DIALOGUE_PER_MESSAGE=true
+```
 
 ### 5.2 重要度评分
 

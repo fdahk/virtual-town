@@ -221,6 +221,112 @@ class DailyReflectionHandler(TaskHandler):
 
 
 # -----------------------------------------------------------------------------
+# memory_consolidation（阶段 20）
+# -----------------------------------------------------------------------------
+
+
+class MemoryConsolidationHandler(TaskHandler):
+    """每仿真日合并低重要度 archived 记忆 → long_term summary。"""
+
+    task_type = "memory_consolidation"
+    default_timeout_seconds = 60.0
+    default_max_retries = 1
+
+    async def handle(self, ctx: TaskContext) -> TaskResult:
+        from app.domain.memory.consolidation import consolidate_archived_memories
+
+        agent_id = ctx.payload.get("agent_id") or ctx.entity_id
+        if not agent_id:
+            return TaskResult(
+                success=False,
+                error_code="TOOL_INVALID_ARGUMENTS",
+                error_message="agent_id missing",
+                retryable=False,
+            )
+        world_time_raw = ctx.payload.get("world_time")
+        try:
+            world_time = (
+                datetime.fromisoformat(world_time_raw)
+                if isinstance(world_time_raw, str)
+                else (world_time_raw or utcnow())
+            )
+        except Exception:
+            world_time = utcnow()
+
+        try:
+            new_summaries = await consolidate_archived_memories(
+                ctx.session, agent_id, world_time=world_time
+            )
+        except Exception as exc:
+            return TaskResult(
+                success=False,
+                error_code="MEMORY_WRITE_FAILED",
+                error_message=str(exc),
+                retryable=True,
+            )
+        return TaskResult(
+            success=True,
+            result={
+                "agent_id": agent_id,
+                "summary_ids": [m.id for m in new_summaries],
+            },
+        )
+
+
+# -----------------------------------------------------------------------------
+# memory_rumination（阶段 20）
+# -----------------------------------------------------------------------------
+
+
+class MemoryRuminationHandler(TaskHandler):
+    """每仿真日抽样重要长期记忆产生新 thought + 强化原记忆。"""
+
+    task_type = "memory_rumination"
+    default_timeout_seconds = 45.0
+    default_max_retries = 1
+
+    async def handle(self, ctx: TaskContext) -> TaskResult:
+        from app.domain.memory.rumination import ruminate_important_memories
+
+        agent_id = ctx.payload.get("agent_id") or ctx.entity_id
+        if not agent_id:
+            return TaskResult(
+                success=False,
+                error_code="TOOL_INVALID_ARGUMENTS",
+                error_message="agent_id missing",
+                retryable=False,
+            )
+        world_time_raw = ctx.payload.get("world_time")
+        try:
+            world_time = (
+                datetime.fromisoformat(world_time_raw)
+                if isinstance(world_time_raw, str)
+                else (world_time_raw or utcnow())
+            )
+        except Exception:
+            world_time = utcnow()
+
+        try:
+            new_mem = await ruminate_important_memories(
+                ctx.session, agent_id, world_time=world_time
+            )
+        except Exception as exc:
+            return TaskResult(
+                success=False,
+                error_code="MEMORY_WRITE_FAILED",
+                error_message=str(exc),
+                retryable=True,
+            )
+        return TaskResult(
+            success=True,
+            result={
+                "agent_id": agent_id,
+                "thought_id": new_mem.id if new_mem else None,
+            },
+        )
+
+
+# -----------------------------------------------------------------------------
 # relationship_update
 # -----------------------------------------------------------------------------
 
@@ -558,6 +664,9 @@ def register_default_handlers() -> None:
     reg.register(GenerateDailyPlanHandler())
     reg.register(GenerateDialogueReplyHandler())
     reg.register(QueryRewriteHandler())
+    # 阶段 20：记忆重构
+    reg.register(MemoryConsolidationHandler())
+    reg.register(MemoryRuminationHandler())
 
 
 __all__ = [
@@ -565,6 +674,8 @@ __all__ = [
     "DailyReflectionHandler",
     "GenerateDailyPlanHandler",
     "GenerateDialogueReplyHandler",
+    "MemoryConsolidationHandler",
+    "MemoryRuminationHandler",
     "QueryRewriteHandler",
     "RelationshipUpdateHandler",
     "WriteMemoryEmbeddingHandler",
