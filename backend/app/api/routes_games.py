@@ -45,8 +45,13 @@ def _default_req_outdoor_height() -> int:
 
 class NewGameRequest(BaseModel):
     seed: int = 42
-    outdoor_width: int = Field(default_factory=_default_req_outdoor_width, ge=40, le=200)
-    outdoor_height: int = Field(default_factory=_default_req_outdoor_height, ge=30, le=200)
+    # 下限与 ``Settings.world_gen_outdoor_default_width/height`` 保持一致：
+    # ``BUILDING_LAYOUT`` / ``HOME_LAYOUT`` 硬编码坐标延伸到 (114, 82)，
+    # 任何小于 120/90 的尺寸都会让 8 户家 + 农场屋 + 木工坊的入口越界、NPC
+    # 永远 "暂时不可达"（详见
+    # ``docs/开发手册/debug/20260502-world-bounds-mismatch.md``）。
+    outdoor_width: int = Field(default_factory=_default_req_outdoor_width, ge=120, le=200)
+    outdoor_height: int = Field(default_factory=_default_req_outdoor_height, ge=90, le=200)
     humans: list[dict[str, Any]] | None = None  # 不传则使用默认 18 人
     animals: list[dict[str, Any]] | None = None
     player: dict[str, Any] | None = None

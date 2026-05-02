@@ -22,7 +22,6 @@ from typing import Any
 
 from app.domain.world_gen.types import BuildingPlan, HomePlan
 
-
 # ---------------------------------------------------------------------------
 # 静态布局数据
 # ---------------------------------------------------------------------------
@@ -152,6 +151,64 @@ def _empty_tile(x: int, y: int, terrain: str = "grass") -> dict[str, Any]:
     }
 
 
+def _assert_layout_within_bounds(width: int, height: int) -> None:
+    """硬编码布局必须全部落在 ``width × height`` 内，否则 fail-fast。
+
+    检查项：
+        - BUILDING_LAYOUT 的 bounds 完整框 + 门 + 门外一格（portal_out 落点）
+        - HOME_LAYOUT 的 4×3 框 + 门 + 门外一格
+        - OUTDOOR_AREAS 的 bounds 完整框 + entry tile
+
+    门外一格 (door_x, door_y+1) 是 portal_out.to_tile，必须在地图内才能让
+    NPC 从室内 portal 出来时落在合法格上，否则 grid.is_walkable() 会因
+    in_bounds 失败永远返回 False。
+    """
+    errors: list[str] = []
+
+    def _check_box(label: str, x: int, y: int, w: int, h: int) -> None:
+        if x < 0 or y < 0 or x + w > width or y + h > height:
+            errors.append(
+                f"{label} 框 ({x},{y})+{w}x{h} 越出 {width}x{height}"
+            )
+
+    def _check_pt(label: str, x: int, y: int) -> None:
+        if not (0 <= x < width and 0 <= y < height):
+            errors.append(f"{label} 点 ({x},{y}) 越出 {width}x{height}")
+
+    for spec in BUILDING_LAYOUT:
+        b = spec["bounds"]
+        _check_box(
+            f"BUILDING[{spec['key']}]", b["x"], b["y"], b["width"], b["height"]
+        )
+        dx, dy = spec["door"]
+        _check_pt(f"BUILDING[{spec['key']}].door", dx, dy)
+        _check_pt(f"BUILDING[{spec['key']}].outside_step", dx, dy + 1)
+
+    home_w, home_h = 4, 3
+    for spec in HOME_LAYOUT:
+        x0, y0 = spec["x"], spec["y"]
+        _check_box(f"HOME[{spec['key']}]", x0, y0, home_w, home_h)
+        dx = x0 + home_w // 2
+        dy = y0 + home_h - 1
+        _check_pt(f"HOME[{spec['key']}].door", dx, dy)
+        _check_pt(f"HOME[{spec['key']}].outside_step", dx, dy + 1)
+
+    for area in OUTDOOR_AREAS:
+        b = area["bounds"]
+        _check_box(f"OUTDOOR_AREA[{area['id']}]", b["x"], b["y"], b["width"], b["height"])
+        ex, ey = area["entry"]
+        _check_pt(f"OUTDOOR_AREA[{area['id']}].entry", ex, ey)
+
+    if errors:
+        raise ValueError(
+            "outdoor 地图尺寸 "
+            f"{width}x{height} 装不下硬编码 BUILDING/HOME/AREA 布局：\n  - "
+            + "\n  - ".join(errors)
+            + "\n\n请把 WORLD_GEN_OUTDOOR_DEFAULT_WIDTH/HEIGHT 调到 ≥120/90，"
+            "或同步修改 BUILDING_LAYOUT/HOME_LAYOUT/OUTDOOR_AREAS 的坐标。"
+        )
+
+
 def build_outdoor_tiles(
     width: int,
     height: int,
@@ -164,7 +221,15 @@ def build_outdoor_tiles(
         - tiles: 完整 tile 列表
         - buildings: BuildingPlan 列表（已包含 interior_scene_id 等字段）
         - homes: HomePlan 列表
+
+    **越界检查**（fail-fast）：
+        BUILDING_LAYOUT / HOME_LAYOUT / OUTDOOR_AREAS 是硬编码的坐标，
+        ``set_tile`` 在越界时静默返回——这会让 location.entry_tiles /
+        portal.from_tile 写入地图外的坐标，NPC 永远走不到那个目标，触发
+        "暂时不可达"刷屏。这里在生成前先做强校验，越界立刻 ValueError，
+        避免静默错乱（详见 ``docs/开发手册/debug/20260502-world-bounds-mismatch.md``）。
     """
+    _assert_layout_within_bounds(width, height)
     tiles: list[dict[str, Any]] = [
         _empty_tile(x, y) for y in range(height) for x in range(width)
     ]

@@ -11,7 +11,7 @@ from __future__ import annotations
 from functools import lru_cache
 from typing import Literal
 
-from pydantic import AnyHttpUrl, Field, PostgresDsn, RedisDsn, field_validator
+from pydantic import AnyHttpUrl, Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -71,8 +71,19 @@ class Settings(BaseSettings):
     simulation_ai_tick_minutes: int = Field(default=3)
     simulation_speed_default: float = Field(default=1.0)
     # 新游戏 / seed 默认室外地图尺寸（格）。前端向导初始值由 GET /games/world-defaults 透出。
-    world_gen_outdoor_default_width: int = Field(default=80, ge=40, le=200)
-    world_gen_outdoor_default_height: int = Field(default=60, ge=30, le=200)
+    #
+    # 最小值由 ``app/domain/world_gen/outdoor.py`` 里硬编码的 BUILDING_LAYOUT /
+    # HOME_LAYOUT 决定（最远建筑：xiaoke 家门 x=114、xiaodi 家门 y=82、woodshop
+    # 门 (92,69) ；OUTDOOR_AREAS 的 forest_grove (32,87) / farmland (53,86)）。
+    # 因此 ``width≥120`` / ``height≥90`` 才能保证默认 22 NPC 模板下所有建筑、
+    # 住宅、户外区域都落在地图内、portal/entry 不越界。
+    #
+    # 历史遗留：曾默认 90×60，导致 8 户家庭 + 农场屋 + 木工坊的入口落在地图外、
+    # NPC 永远 "暂时不可达"，并触发 22 NPC 决策刷屏的现象（详见
+    # ``docs/开发手册/debug/20260502-world-bounds-mismatch.md``）。
+    # 通过 ``backend/tests/test_world_gen_reachability.py`` 在 CI 守住。
+    world_gen_outdoor_default_width: int = Field(default=120, ge=120, le=200)
+    world_gen_outdoor_default_height: int = Field(default=90, ge=90, le=200)
     # 默认 False：用户必须从前端「开始页」手动点「新游戏」或「读档」启动仿真，
     # 避免后端起步时悄悄运行一个旧世界。需要 CI 自动启动仿真时显式置 True。
     simulation_autostart: bool = Field(default=False)

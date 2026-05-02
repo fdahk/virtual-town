@@ -278,6 +278,8 @@ def generate_world(config: GenerationConfig) -> WorldPlan:
         config.humans, config.animals, config.player,
         homes=homes, buildings=buildings,
         outdoor_scene_id=plan.outdoor_scene_id,
+        outdoor_width=config.outdoor_width,
+        outdoor_height=config.outdoor_height,
     )
     plan.agents = agent_rows
     plan.agent_states = state_rows

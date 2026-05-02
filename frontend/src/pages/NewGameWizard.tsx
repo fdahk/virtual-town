@@ -26,10 +26,11 @@ interface ArtCatalog {
 export function NewGameWizard({ onCancel, onCreated }: Props) {
   const [step, setStep] = useState<Step>("world");
 
-  // 世界参数
+  // 世界参数。初始 fallback 与 backend ``world_gen_outdoor_default_*``
+  // 保持一致；首屏 useEffect 内的 ``getWorldDefaults()`` 会再覆盖一次实际配置值。
   const [seed, setSeed] = useState<number>(42);
-  const [width, setWidth] = useState<number>(80);
-  const [height, setHeight] = useState<number>(60);
+  const [width, setWidth] = useState<number>(120);
+  const [height, setHeight] = useState<number>(90);
 
   // 模板与 art 目录
   const [art, setArt] = useState<ArtCatalog | null>(null);
@@ -199,6 +200,22 @@ export function NewGameWizard({ onCancel, onCreated }: Props) {
 // 子步骤
 // ---------------------------------------------------------------------------
 
+// 与 backend ``NewGameRequest`` 的 Field(ge=, le=) 约束严格保持一致。
+//
+// 最小值由地图硬编码布局决定：``BUILDING_LAYOUT`` / ``HOME_LAYOUT``
+// 延伸到 (114, 82)，任何小于 120/90 的尺寸都会让 8 户家 + 农场屋 +
+// 木工坊的入口越界、NPC 永远 "暂时不可达"。详见
+// ``docs/开发手册/debug/20260502-world-bounds-mismatch.md``。
+//
+// ⚠ 改这两个数前，必须同步：
+//   - ``backend/app/core/config.py`` ``world_gen_outdoor_default_*`` 的 ``ge``
+//   - ``backend/app/api/routes_games.py`` ``NewGameRequest`` 的 ``ge``
+//   - ``backend/tests/test_world_gen_reachability.py`` 的连通性测试
+const WORLD_CONSTRAINTS = {
+  width:  { min: 120, max: 200 },
+  height: { min: 90,  max: 200 },
+} as const;
+
 function WorldStep(props: {
   seed: number;
   width: number;
@@ -208,6 +225,28 @@ function WorldStep(props: {
   onHeight: (n: number) => void;
   onNext: () => void;
 }) {
+  const { min: wMin, max: wMax } = WORLD_CONSTRAINTS.width;
+  const { min: hMin, max: hMax } = WORLD_CONSTRAINTS.height;
+
+  const widthErr =
+    !Number.isFinite(props.width) || props.width < wMin || props.width > wMax
+      ? `宽度须在 ${wMin}–${wMax} 格之间`
+      : null;
+  const heightErr =
+    !Number.isFinite(props.height) || props.height < hMin || props.height > hMax
+      ? `高度须在 ${hMin}–${hMax} 格之间`
+      : null;
+  const hasError = widthErr !== null || heightErr !== null;
+
+  const handleWidth = (raw: string) => {
+    const v = parseInt(raw, 10);
+    props.onWidth(Number.isNaN(v) ? wMin : v);
+  };
+  const handleHeight = (raw: string) => {
+    const v = parseInt(raw, 10);
+    props.onHeight(Number.isNaN(v) ? hMin : v);
+  };
+
   return (
     <section style={styles.section}>
       <h2 style={styles.h2}>世界参数</h2>
@@ -221,35 +260,62 @@ function WorldStep(props: {
           <input
             type="number"
             value={props.seed}
-            onChange={(e) => props.onSeed(Number(e.target.value) || 0)}
+            onChange={(e) => props.onSeed(parseInt(e.target.value, 10) || 0)}
             style={styles.input}
           />
         </label>
-        <label style={styles.field}>
-          <span>地图宽（格）</span>
+        <div style={styles.field}>
+          <span>
+            地图宽（格）
+            <span style={styles.constraintHint}> {wMin}–{wMax}</span>
+          </span>
           <input
             type="number"
             value={props.width}
-            min={40}
-            max={200}
-            onChange={(e) => props.onWidth(Number(e.target.value) || 120)}
-            style={styles.input}
+            min={wMin}
+            max={wMax}
+            onChange={(e) => handleWidth(e.target.value)}
+            onBlur={(e) => {
+              const v = parseInt(e.target.value, 10);
+              if (!Number.isNaN(v)) props.onWidth(Math.max(wMin, Math.min(wMax, v)));
+            }}
+            style={{ ...styles.input, ...(widthErr ? styles.inputError : {}) }}
           />
-        </label>
-        <label style={styles.field}>
-          <span>地图高（格）</span>
+          {widthErr && <span style={styles.fieldError}>{widthErr}</span>}
+        </div>
+        <div style={styles.field}>
+          <span>
+            地图高（格）
+            <span style={styles.constraintHint}> {hMin}–{hMax}</span>
+          </span>
           <input
             type="number"
             value={props.height}
-            min={30}
-            max={200}
-            onChange={(e) => props.onHeight(Number(e.target.value) || 90)}
-            style={styles.input}
+            min={hMin}
+            max={hMax}
+            onChange={(e) => handleHeight(e.target.value)}
+            onBlur={(e) => {
+              const v = parseInt(e.target.value, 10);
+              if (!Number.isNaN(v)) props.onHeight(Math.max(hMin, Math.min(hMax, v)));
+            }}
+            style={{ ...styles.input, ...(heightErr ? styles.inputError : {}) }}
           />
-        </label>
+          {heightErr && <span style={styles.fieldError}>{heightErr}</span>}
+        </div>
       </div>
+      <p style={styles.help} aria-live="polite">
+        当前配置将生成约{" "}
+        <strong style={{ color: "#e8edf5" }}>{props.width}×{props.height}</strong>{" "}
+        ({props.width * props.height} 格) 的室外地图。
+        默认 120×90 已经能装下全部 22 NPC 的家与工作地；调更大只是给装饰物 / 自定义 NPC 多留空间。
+      </p>
       <div style={styles.actions}>
-        <button style={styles.primaryBtn} onClick={props.onNext}>
+        <button
+          style={{ ...styles.primaryBtn, ...(hasError ? styles.primaryBtnDisabled : {}) }}
+          onClick={props.onNext}
+          disabled={hasError}
+          title={hasError ? (widthErr ?? heightErr ?? "") : undefined}
+        >
           下一步：编辑居民
         </button>
       </div>
@@ -669,6 +735,25 @@ const styles: Record<string, React.CSSProperties> = {
     borderRadius: 8,
     border: "1px solid rgba(255, 96, 96, 0.3)",
     fontSize: 13,
+  },
+  constraintHint: {
+    fontSize: 11,
+    color: "#66748a",
+    fontWeight: 400,
+  },
+  inputError: {
+    borderColor: "rgba(255, 96, 96, 0.6)",
+    background: "rgba(255, 50, 50, 0.06)",
+  },
+  fieldError: {
+    fontSize: 12,
+    color: "#ff8080",
+    marginTop: 2,
+  },
+  primaryBtnDisabled: {
+    opacity: 0.45,
+    cursor: "not-allowed",
+    background: "rgba(75, 111, 255, 0.4)",
   },
   submittingBox: {
     textAlign: "center",

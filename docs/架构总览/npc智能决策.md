@@ -535,6 +535,24 @@ key：`agent:{agent_id}:unreachable`（Redis SET，TTL 300s）
 > - 两者独立：wander 分支只带 unreachable，不带 stuck（让 NPC 按 ai_tick
 >   节奏推进，避免每 tick 重复决策）。
 
+> **真根因警惕：「物理不可达」要在世界生成层就堵死**（2026-05-02 二修）：
+> 黑名单 / wander 兜底只能掩盖"被障碍墙挡住"这种**逻辑上仍然可达**的场景。
+> 当目标本身就在地图外（``Location.entry_tiles`` 越界、``portal.from_tile``
+> 落在 ``in_bounds=False`` 的格上），任何 BFS / A* 都会永远失败、整个
+> 黑名单循环就变成"真不可达 → 假装在闲逛 → 又重决策 → 又判定不可达"
+> 的无限刷屏。22 NPC 测试时观察到的多名 NPC 进不了家 / 工作地、几乎
+> 不产生记忆，根因正是默认 outdoor 90×60 装不下 BUILDING/HOME 的
+> 硬编码 120×90 布局。
+>
+> 修法分两层：
+> 1. ``world_gen/outdoor.py`` 入口 fail-fast（``_assert_layout_within_bounds``）
+>    + ``WORLD_GEN_OUTDOOR_DEFAULT_*`` 默认改 120/90 并 ``ge=120/90``；
+> 2. ``backend/tests/test_world_gen_reachability.py`` 在 CI 跑端到端
+>    "中央广场 → outdoor portal → 室内 entry" 全链路 A*，任何破坏
+>    世界连通性的改动立即失败。
+>
+> 详见 `docs/开发手册/debug/20260502-world-bounds-mismatch.md`。
+
 ## 7. 调参指南：让 NPC 更社交、更"过日子"
 
 > 默认值已经过一轮调整，下面列出的是各参数对体验的影响和推荐区间。

@@ -250,6 +250,307 @@ async def agent_runtime(
 
 
 # -----------------------------------------------------------------------------
+# Path debug：复盘"NPC 走不到目标"的一站式诊断
+# -----------------------------------------------------------------------------
+
+
+@router.get("/agents/{agent_id}/path-debug")
+async def agent_path_debug(
+    agent_id: str,
+    target_location_id: str | None = Query(
+        None,
+        description=(
+            "可选。不传则用 NPC 当前 schedule 的 slot.location_id；"
+            "传入则强制以该 location 为目标排查。"
+        ),
+    ),
+    session: AsyncSession = Depends(get_session),
+) -> dict[str, Any]:
+    """一次返回排查"NPC 路径不可达"所需的全部信息：
+
+    - NPC 当前位置 + schedule 当前 slot；
+    - 目标 location 的 entry tile + walkable 状态（含/不含 hazard 两种）；
+    - 跨场景 portal 链；
+    - 多段 A* 实际结果（含/不含 hazard 两种）；
+    - Redis 不可达黑名单镜像；
+    - 自动诊断结论。
+
+    用法：``GET /api/observability/agents/{npc_id}/path-debug``
+    """
+    from app.core.redis_client import key_agent_unreachable
+    from app.core.time import utcnow as _utcnow
+    from app.db.models import Location, Portal
+    from app.domain.simulation.rule_agent import (
+        _choose_goal_tile_for_slot,
+        _find_inter_scene_route,
+        _find_portal_from_to,
+    )
+    from app.domain.simulation.schedule import pick_current_slot
+    from app.domain.world.grid import astar
+    from app.domain.world.scene_cache import get_scene_cache
+
+    agent = await session.get(Agent, agent_id)
+    if agent is None:
+        raise TargetNotFound(f"agent {agent_id} not found")
+    state = await session.get(AgentState, agent_id)
+    if state is None:
+        raise TargetNotFound(f"agent_state {agent_id} not found")
+
+    sim = get_simulation_runtime().engine.get_simulation()
+    world_time = sim.world_time if sim else _utcnow()
+
+    schedule = agent.schedule_template or []
+    slot = pick_current_slot(schedule, world_time.time())
+    slot_dict = (
+        {
+            "start": slot.start.isoformat(),
+            "end": slot.end.isoformat(),
+            "activity": slot.activity,
+            "location_id": slot.location_id,
+            "description": slot.description,
+        }
+        if slot is not None
+        else None
+    )
+
+    target_loc_id = target_location_id or (slot.location_id if slot else None)
+
+    locations: dict[str, dict[str, Any]] = {}
+    for loc in (await session.execute(select(Location))).scalars().all():
+        locations[loc.id] = {
+            "id": loc.id,
+            "scene_id": loc.scene_id,
+            "bounds": loc.bounds,
+            "entry_tiles": loc.entry_tiles or [],
+        }
+
+    portals_rows = (await session.execute(select(Portal))).scalars().all()
+    portals_by_scene: dict[str, list[dict[str, Any]]] = {}
+    for p in portals_rows:
+        portals_by_scene.setdefault(p.from_scene_id, []).append(
+            {
+                "id": p.id,
+                "from_scene_id": p.from_scene_id,
+                "to_scene_id": p.to_scene_id,
+                "from_tile": p.from_tile,
+                "to_tile": p.to_tile,
+            }
+        )
+
+    # 把 portals 包成 rule_agent 期望的结构（带 from_scene_id / to_scene_id /
+    # from_tile / to_tile 属性的对象）
+    from types import SimpleNamespace
+
+    def _to_ns(p: dict[str, Any]) -> SimpleNamespace:
+        return SimpleNamespace(**p)
+
+    portals_ns_by_scene: dict[str, list[Any]] = {
+        sid: [_to_ns(p) for p in items] for sid, items in portals_by_scene.items()
+    }
+
+    cache = get_scene_cache()
+
+    def _walkable_pair(scene_id: str, x: int, y: int) -> dict[str, Any]:
+        """返回该 (scene, x, y) 的 walkable 状态（含 / 不含 hazard 两版）。"""
+        grid = cache.get_grid(scene_id)
+        if grid is None:
+            return {"scene_loaded": False}
+        tile = grid.get(x, y)
+        return {
+            "scene_loaded": True,
+            "in_bounds": grid.in_bounds(x, y),
+            "tile_present": tile is not None,
+            "walkable_no_hazard": grid.is_walkable(x, y, avoid_hazards=False),
+            "walkable_npc_view": grid.is_walkable(x, y, avoid_hazards=True),
+            "tile_info": (
+                {
+                    "walkable": tile.walkable,
+                    "blocks_movement": tile.blocks_movement,
+                    "hazard_type": tile.hazard_type,
+                    "hazard_level": tile.hazard_level,
+                    "terrain": tile.terrain,
+                }
+                if tile is not None
+                else None
+            ),
+        }
+
+    target_info: dict[str, Any] = {"id": target_loc_id}
+    chosen_entry: tuple[int, int] | None = None
+    target_scene_id: str | None = None
+    if target_loc_id and target_loc_id in locations:
+        loc = locations[target_loc_id]
+        target_info.update(
+            {
+                "scene_id": loc["scene_id"],
+                "entry_tiles": loc["entry_tiles"],
+                "bounds": loc["bounds"],
+            }
+        )
+        chosen = _choose_goal_tile_for_slot(target_loc_id, locations)
+        if chosen is not None:
+            target_scene_id, chosen_entry = chosen
+            target_info["chosen_target"] = {
+                "scene_id": target_scene_id,
+                "x": chosen_entry[0],
+                "y": chosen_entry[1],
+                "walkability": _walkable_pair(
+                    target_scene_id, chosen_entry[0], chosen_entry[1]
+                ),
+            }
+    elif target_loc_id:
+        target_info["error"] = "location_not_found"
+
+    # 当前 NPC 黑名单（Redis）
+    blacklist: list[str] = []
+    try:
+        members = await get_redis().set_members(key_agent_unreachable(agent_id))
+        blacklist = sorted(members)
+    except Exception:
+        logger.debug("read unreachable blacklist failed", exc_info=True)
+
+    # 多段 pathfinding
+    pathfinding: dict[str, Any] = {}
+    if chosen_entry is not None and target_scene_id is not None:
+        cur = (state.x, state.y)
+        cur_scene = state.scene_id
+        if cur_scene == target_scene_id:
+            grid = cache.get_grid(cur_scene)
+            if grid is not None:
+                p_safe = astar(grid, cur, chosen_entry, avoid_hazards=True)
+                p_raw = astar(grid, cur, chosen_entry, avoid_hazards=False)
+                pathfinding["leg1"] = {
+                    "scene_id": cur_scene,
+                    "from": list(cur),
+                    "to": list(chosen_entry),
+                    "found_npc_view": bool(p_safe),
+                    "found_no_hazard": bool(p_raw),
+                    "length_npc_view": len(p_safe) if p_safe else 0,
+                }
+        else:
+            portal_tile = _find_portal_from_to(
+                portals_ns_by_scene, cur_scene, target_scene_id
+            )
+            next_scene = target_scene_id
+            route_used = "direct"
+            if portal_tile is None:
+                route = _find_inter_scene_route(
+                    portals_ns_by_scene, cur_scene, target_scene_id
+                )
+                if route:
+                    next_scene = route[0]
+                    portal_tile = _find_portal_from_to(
+                        portals_ns_by_scene, cur_scene, next_scene
+                    )
+                    route_used = "multi_hop:" + " → ".join([cur_scene, *route])
+                else:
+                    route_used = "no_route"
+            pathfinding["scene_chain"] = {
+                "from_scene": cur_scene,
+                "to_scene": target_scene_id,
+                "first_hop_scene": next_scene,
+                "route": route_used,
+                "first_hop_portal_tile": list(portal_tile) if portal_tile else None,
+                "first_hop_portal_walkability": (
+                    _walkable_pair(cur_scene, portal_tile[0], portal_tile[1])
+                    if portal_tile
+                    else None
+                ),
+            }
+            grid = cache.get_grid(cur_scene)
+            if grid is not None and portal_tile is not None:
+                p_safe = astar(grid, cur, portal_tile, avoid_hazards=True)
+                p_raw = astar(grid, cur, portal_tile, avoid_hazards=False)
+                pathfinding["leg1"] = {
+                    "scene_id": cur_scene,
+                    "from": list(cur),
+                    "to": list(portal_tile),
+                    "found_npc_view": bool(p_safe),
+                    "found_no_hazard": bool(p_raw),
+                    "length_npc_view": len(p_safe) if p_safe else 0,
+                }
+
+    # 自动诊断
+    diagnosis: list[str] = []
+    if target_loc_id and target_loc_id in blacklist:
+        diagnosis.append(
+            f"[BLACKLISTED] {target_loc_id} 已在 5 分钟黑名单内，"
+            "近期一次寻路失败导致；以下分析针对那次失败的根因，而非「当前一刻」。"
+        )
+    if "chosen_target" in target_info:
+        wk = target_info["chosen_target"]["walkability"]
+        if not wk.get("scene_loaded"):
+            diagnosis.append(
+                f"[CRITICAL] 目标 scene_id={target_info['scene_id']} 未加载到 SceneCache，"
+                "可能是新建场景没刷 cache。"
+            )
+        elif not wk.get("walkable_no_hazard"):
+            diagnosis.append(
+                f"[ENTRY_BLOCKED] entry_tile {target_info['chosen_target']['x']},"
+                f"{target_info['chosen_target']['y']} 在 grid 中不可走"
+                f"（tile={wk.get('tile_info')}）。世界生成器 bug：location 入口"
+                "落在不可走 tile 上。"
+            )
+        elif not wk.get("walkable_npc_view") and wk.get("walkable_no_hazard"):
+            diagnosis.append(
+                "[ENTRY_HAZARD] entry_tile 玩家视角可走，但 NPC 因 hazard 视为不可走"
+                "（NPC 默认 avoid_hazards=True）。"
+            )
+    if "leg1" in pathfinding:
+        leg = pathfinding["leg1"]
+        if not leg["found_npc_view"] and leg["found_no_hazard"]:
+            diagnosis.append(
+                "[PATH_HAZARD] 第一段 A* 在不避 hazard 时可达、避 hazard 时不可达——"
+                "意味着路径必须穿过 hazard tile（如河水/火），NPC 拒走。"
+                "这就是「看着能走但 NPC 走不到」的最常见原因。"
+            )
+        elif not leg["found_npc_view"] and not leg["found_no_hazard"]:
+            diagnosis.append(
+                "[PATH_BLOCKED] 第一段 A* 即使忽略 hazard 也不可达——"
+                "拓扑上被 blocks_movement 物体或 walkable=False 的 tile 完全切断。"
+            )
+    if "scene_chain" in pathfinding:
+        sc = pathfinding["scene_chain"]
+        if sc["route"] == "no_route":
+            diagnosis.append(
+                f"[NO_PORTAL] {sc['from_scene']} → {sc['to_scene']} 没有任何 portal 链，"
+                "Portal 表数据缺失或 from_scene/to_scene 写反。"
+            )
+        if sc.get("first_hop_portal_walkability") and not sc[
+            "first_hop_portal_walkability"
+        ].get("walkable_no_hazard"):
+            diagnosis.append(
+                f"[PORTAL_TILE_BLOCKED] 通往 {sc['first_hop_scene']} 的 portal "
+                f"from_tile={sc['first_hop_portal_tile']} 自身不可走，"
+                "Portal 数据 / 世界生成器 bug。"
+            )
+    if not diagnosis:
+        diagnosis.append("[OK] 诊断未发现明显问题；建议结合 leg1.length_npc_view 与人工肉眼对照。")
+
+    return {
+        "agent": {
+            "id": agent.id,
+            "name": agent.name,
+            "schedule_template": schedule,
+        },
+        "world_time": world_time.isoformat(),
+        "current_position": {
+            "scene_id": state.scene_id,
+            "x": state.x,
+            "y": state.y,
+            "state": state.state,
+            "current_goal": state.current_goal,
+            "scene_walkability_here": _walkable_pair(state.scene_id, state.x, state.y),
+        },
+        "current_slot": slot_dict,
+        "target_location": target_info,
+        "blacklist": blacklist,
+        "pathfinding": pathfinding,
+        "diagnosis": diagnosis,
+    }
+
+
+# -----------------------------------------------------------------------------
 # Trace
 # -----------------------------------------------------------------------------
 

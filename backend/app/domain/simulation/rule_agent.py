@@ -161,9 +161,14 @@ def _recovery_tile_bfs(
     grid: SceneGrid,
     origin: tuple[int, int],
     *,
-    max_radius: int = 5,
+    max_radius: int = 8,
 ) -> tuple[int, int] | None:
-    """BFS 找到离 origin 最近的可走格，用于将卡住的 NPC 移出死区。"""
+    """BFS 找到离 origin 最近的可走格，用于将卡住的 NPC 移出死区。
+
+    ``max_radius`` 默认 8（曾经 5）：5 在围栏 / 大型障碍物背后的角色容易
+    BFS 不到任何可走格，被迫返回 stuck=True 的 wait，导致 NPC 站在
+    河岸 / 农田边缘僵住。8 给了足够余量绕过单条围栏 / 一道墙体。
+    """
     visited: set[tuple[int, int]] = {origin}
     q: deque[tuple[int, int]] = deque([origin])
     while q:
@@ -480,7 +485,7 @@ def _make_recovery_or_wait(
     - **wander 分支**不打 ``stuck`` 标记：NPC 已经在动，按正常 ai_tick
       节奏重决策即可，黑名单已经会让下次决策避开该目标。
     """
-    recovery = _recovery_tile_bfs(grid, origin, max_radius=5)
+    recovery = _recovery_tile_bfs(grid, origin, max_radius=8)
     if recovery is not None:
         path = astar(grid, origin, recovery, avoid_hazards=True)
         if path:

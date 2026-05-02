@@ -35,6 +35,8 @@ def assign_and_build_agents(
     homes: list[HomePlan],
     buildings: list[BuildingPlan],
     outdoor_scene_id: str,
+    outdoor_width: int = 200,
+    outdoor_height: int = 200,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], dict[str, HomePlan]]:
     """把 NPC 分配到住宅 / 工作场所。
 
@@ -143,6 +145,11 @@ def assign_and_build_agents(
                 start_x, start_y = h.door
             else:
                 start_x, start_y = 60, 42
+
+        # 安全兜底：将出生坐标钳制在地图范围内，防止地图尺寸偏小时坐标越界
+        # 导致角色不可见（e.g. 玩家固定 (54,42) 在 40×30 地图中越界）。
+        start_x = max(0, min(start_x, outdoor_width - 1))
+        start_y = max(0, min(start_y, outdoor_height - 1))
 
         # schedule 解析
         schedule: list[dict[str, Any]] = []
