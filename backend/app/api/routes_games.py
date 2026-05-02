@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Body, Depends, HTTPException
 from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -18,7 +18,13 @@ from app.db.templates import (
     OCCUPATION_PRESETS,
     SCHEDULE_TEMPLATES,
 )
-from app.services.game_service import create_new_game, export_save
+from app.services.game_service import (
+    SAVE_FORMAT_VERSION,
+    SaveValidationError,
+    create_new_game,
+    export_save,
+    import_save,
+)
 
 router = APIRouter(prefix="/games", tags=["games"])
 
@@ -109,3 +115,38 @@ async def get_art_catalog() -> ArtCatalogResponse:
 async def get_save(session: AsyncSession = Depends(get_session)) -> dict[str, Any]:
     """导出当前世界为 JSON 快照（前端可下载存盘）。"""
     return await export_save(session)
+
+
+class LoadSaveResponse(BaseModel):
+    simulation_id: str
+    status: str
+    current_step: int
+    imported_counts: dict[str, int] = Field(default_factory=dict)
+
+
+@router.post("/load", response_model=LoadSaveResponse)
+async def post_load_save(
+    payload: dict[str, Any] = Body(...),
+    session: AsyncSession = Depends(get_session),
+) -> LoadSaveResponse:
+    """读档：清空当前 DB → 把 JSON 快照写回 → reload 引擎。
+
+    Body 直接是 ``GET /api/games/save`` 返回的 JSON 对象。
+
+    校验失败返回 400（``SaveValidationError``），其它异常按 FastAPI 默认 500。
+    """
+    try:
+        result = await import_save(session, payload)
+    except SaveValidationError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return LoadSaveResponse(**result)
+
+
+@router.get("/save/format-version")
+async def get_save_format_version() -> dict[str, str]:
+    """返回当前服务端期望的存档格式版本号。
+
+    前端在读档前可先调用此接口对比版本，给用户更清晰的提示
+    （而不是上传完才发现 400）。
+    """
+    return {"version": SAVE_FORMAT_VERSION}

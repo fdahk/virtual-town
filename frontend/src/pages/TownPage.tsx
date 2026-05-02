@@ -47,6 +47,7 @@ import { ChatPanel } from "../components/ChatPanel";
 import { TimeControl } from "../components/TimeControl";
 import { DebugToggle } from "../components/DebugToggle";
 import { MemoryViewer } from "../components/MemoryViewer";
+import { SaveGameButton } from "../components/SaveGameButton";
 
 function clamp(n: number, min: number, max: number): number {
   return Math.max(min, Math.min(max, n));
@@ -759,6 +760,7 @@ export function TownPage() {
         <div style={{ fontSize: 14, fontWeight: 600 }}>AI 小镇</div>
         <TimeControl />
         <div style={{ marginLeft: "auto", display: "flex", gap: 10, alignItems: "center" }}>
+          <SaveGameButton />
           <DebugToggle />
           {store.trackingAgentId && (
             <span

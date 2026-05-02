@@ -9,8 +9,10 @@
 ┌──────────────────────────────────────────────────────────────────────┐
 │  StartPage (前端)                                                    │
 │    新游戏 → NewGameWizard → POST /api/games/new                      │
-│    读档   → 文件选择 → POST /api/games/load (TODO)                   │
+│    读档   → <input type="file"> → POST /api/games/load               │
 │    继续   → 当前 simulation.status === running 才可见                │
+│  TownPage (顶栏)                                                     │
+│    存档   → SaveGameButton → GET /api/games/save → Blob 下载         │
 └──────────────────────────────────────────────────────────────────────┘
                                 │
                                 ▼
@@ -136,10 +138,60 @@ class AgentTemplate:
 
 由 `art_catalog.resolve_schedule()` 在 `placement` 阶段替换。
 
-## 5. 已知限制 & 待办
+## 5. 存档 / 读档（阶段 21 落地）
 
-- **多存档并存**：当前架构是单世界 + JSON 快照导出（`GET /api/games/save`）。
-  导入/上传读档（`POST /api/games/load`）尚未实现，前端暂为提示框。
+### 5.1 存档（导出 JSON 快照）
+
+- **入口**：TownPage 顶栏「存档」按钮（`SaveGameButton.tsx`）。
+- **后端**：`GET /api/games/save` → `game_service.export_save()`。
+- **覆盖**：simulation 元 / scenes / tiles / locations / portals / world_objects /
+  agents（含 state）/ relationships / memories（**不含 embedding**）。
+- **不覆盖**：`world_events` / `agent_actions` / `dialogue_messages` /
+  `observability_events` / `tasks` / `task_status_log`（流式叙事 + 审计 +
+  任务队列状态都是会话级数据，重启后从新世界出发即可）。
+- **完整性**：payload 末尾带 `checksum`（SHA-256，计算时排除自己）+
+  `counts`（每张表行数）+ `saved_at`（UTC ISO8601）。
+- **文件名**：`vt-save-YYYY-MM-DD-stepN.json`，由前端 `SaveGameButton` 拼接。
+
+### 5.2 读档（导入 JSON 快照）
+
+- **入口**：StartPage「读取存档（上传 JSON）」→ 隐藏的 `<input type="file">`。
+- **后端**：`POST /api/games/load` → `game_service.import_save()`。
+- **流程**：
+  1. `_validate_save(payload)`：检查 `version` 主版本号 + 必需字段
+     （`scenes` / `tiles` / `locations` / 非空 `agents`），不通过返回 400 +
+     中文 `detail`。
+  2. 复用 `world_gen.apply.CLEAR_TABLES` 按 FK 倒序清表。
+  3. 按 FK 顺序写入：scenes → tiles → locations → portals → world_objects
+     → agents → agent_states → relationships → memories → simulation。
+  4. `simulation_runtime.reload()` 让引擎从 DB 重读世界；status 取 payload
+     里的值，默认 `paused`（避免一进入就开始烧 LLM token）。
+- **memory.embedding 重建**：导入时故意置 NULL；后续 `write_memory_embedding`
+  任务批量补算。期间记忆检索会退化到关键词匹配，是已知的可接受过渡态。
+
+### 5.3 版本号 & 兼容策略
+
+`SAVE_FORMAT_VERSION = "1.1"`（写在 `game_service.py`）。
+
+| 改动类型 | bump 哪一位 | 旧 save 是否能被新服务接受？ |
+|----------|------------|------------------------------|
+| 新增字段（默认值兜底） | 次版本号（1.0 → 1.1） | ✓ 可接受，缺失字段走默认值 |
+| 字段类型变更 / 删除字段 / 重命名 | 主版本号（1.x → 2.x） | ✗ 直接 400，需要写迁移脚本 |
+
+`GET /api/games/save/format-version` 让前端在导入前主动对比版本号，
+避免上传完整 2.8MB JSON 后才发现不兼容。
+
+### 5.4 测试
+
+`backend/tests/test_save_load_roundtrip.py` 覆盖：
+- 纯校验（不依赖 DB）：版本号缺失 / 主版本号不兼容 / agents 为空 / 次版本号差异
+- 集成（需要 `TEST_DATABASE_URL`）：export → import → export 两次 counts 等值；
+  导入后 memory.embedding 全部 NULL（验证 backfill 契约）
+
+## 6. 已知限制 & 待办
+
+- **多存档并存**：当前是「单世界 + 多 JSON 快照」模式，读档会清空当前世界。
+  如需多人共享/并存多个世界，需要在 DB 加 `world_id` 维度（破坏性改动，下个阶段再说）。
 - **实时 LPC 预览**：`NPCEditor` 当前用 `accent_color` + 层 ID 文本提示替代真实合成图。
   完整方案是新增 `POST /api/games/preview-sprite` → 调 `compose_lpc.py` → 返回 PNG dataURL。
 - **美术资源扩展**：当前只有 LPC + Tiny Town/Dungeon。如需更多农场/森林贴图，

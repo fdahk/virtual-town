@@ -148,6 +148,15 @@ export const api = {
       relationship_count: number;
     }>("/api/games/new", body),
   getSaveSnapshot: () => apiGet<Record<string, unknown>>("/api/games/save"),
+  getSaveFormatVersion: () =>
+    apiGet<{ version: string }>("/api/games/save/format-version"),
+  postLoadSave: (snapshot: Record<string, unknown>) =>
+    apiPost<{
+      simulation_id: string;
+      status: string;
+      current_step: number;
+      imported_counts: Record<string, number>;
+    }>("/api/games/load", snapshot),
 
   // ---- simulation ----
   getCurrentSimulation: () => apiGet<Simulation>("/api/simulations/current"),

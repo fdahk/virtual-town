@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { api } from "../api";
 import type { Simulation } from "../types/domain";
 import { NewGameWizard } from "./NewGameWizard";
@@ -18,12 +18,15 @@ interface Props {
  *   - 其它 / 无 → 默认隐藏入口
  * - 始终显示「新游戏」+「读档」两条主路径
  *
- * 「新游戏」打开 NewGameWizard 三步向导；「读档」选 JSON 文件后
- * （后续接 POST /api/games/load；当前先 stub）。
+ * 「新游戏」打开 NewGameWizard 三步向导；「读档」用隐藏的 file picker
+ * 读取 JSON 后调 POST /api/games/load。
  */
 export function StartPage({ onEnterTown }: Props) {
   const [mode, setMode] = useState<Mode>("menu");
   const [sim, setSim] = useState<Simulation | null>(null);
+  const [loadingSave, setLoadingSave] = useState(false);
+  const [loadError, setLoadError] = useState<string | null>(null);
+  const fileInputRef = useRef<HTMLInputElement | null>(null);
 
   useEffect(() => {
     (async () => {
@@ -37,6 +40,40 @@ export function StartPage({ onEnterTown }: Props) {
   }, []);
 
   const continueAvailable = sim != null && sim.status === "running";
+
+  /**
+   * 读档主流程：
+   * 1. 用 FileReader 把 .json 读成文本 → JSON.parse
+   * 2. 校验 version 字段存在（更详细的版本号校验交给后端）
+   * 3. POST /api/games/load → 后端清空 DB 后写入 + reload 引擎
+   * 4. 跳转 TownPage（status=paused，玩家从顶部「时间控制」恢复）
+   */
+  const handleFileSelected = async (file: File) => {
+    setLoadError(null);
+    setLoadingSave(true);
+    try {
+      const text = await file.text();
+      let snapshot: Record<string, unknown>;
+      try {
+        snapshot = JSON.parse(text);
+      } catch (parseErr) {
+        throw new Error(`存档不是合法 JSON：${(parseErr as Error).message}`);
+      }
+      if (typeof snapshot.version !== "string") {
+        throw new Error("存档缺少 version 字段，无法识别格式版本");
+      }
+      const result = await api.postLoadSave(snapshot);
+      console.info("[load_save] imported", result);
+      onEnterTown();
+    } catch (err) {
+      const msg = (err as { message?: string })?.message ?? String(err);
+      console.warn("[load_save] failed", err);
+      setLoadError(msg);
+    } finally {
+      setLoadingSave(false);
+      if (fileInputRef.current) fileInputRef.current.value = "";
+    }
+  };
 
   if (mode === "new_game") {
     return (
@@ -72,14 +109,34 @@ export function StartPage({ onEnterTown }: Props) {
           </span>
         </button>
         <button
-          style={styles.secondaryBtn}
-          onClick={() => alert("读档功能开发中：稍后可上传 JSON 快照恢复世界。")}
+          style={{
+            ...styles.secondaryBtn,
+            opacity: loadingSave ? 0.5 : 1,
+            cursor: loadingSave ? "wait" : "pointer",
+          }}
+          onClick={() => fileInputRef.current?.click()}
+          disabled={loadingSave}
         >
-          读取存档（上传 JSON）
+          {loadingSave ? "正在导入存档…" : "读取存档（上传 JSON）"}
           <span style={styles.btnSub}>
-            从导出的 ``GET /api/games/save`` 快照中恢复
+            从 GET /api/games/save 导出的快照恢复世界
           </span>
         </button>
+        <input
+          ref={fileInputRef}
+          type="file"
+          accept="application/json,.json"
+          style={{ display: "none" }}
+          onChange={(e) => {
+            const file = e.target.files?.[0];
+            if (file) void handleFileSelected(file);
+          }}
+        />
+        {loadError && (
+          <div style={styles.errorBanner} role="alert">
+            读档失败：{loadError}
+          </div>
+        )}
       </div>
 
       <div style={styles.footer}>
@@ -175,6 +232,16 @@ const styles: Record<string, React.CSSProperties> = {
     fontSize: 12,
     fontWeight: 400,
     opacity: 0.7,
+  },
+  errorBanner: {
+    padding: "10px 14px",
+    borderRadius: 8,
+    background: "rgba(220, 80, 80, 0.12)",
+    border: "1px solid rgba(220, 80, 80, 0.4)",
+    color: "#ffb4b4",
+    fontSize: 13,
+    lineHeight: 1.5,
+    whiteSpace: "pre-wrap",
   },
   footer: {
     marginTop: 24,

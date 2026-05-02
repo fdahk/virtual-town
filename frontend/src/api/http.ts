@@ -49,11 +49,16 @@ async function handle<T>(resp: Response): Promise<T> {
     let err: ApiError;
     try {
       const body = await resp.json();
+      // 兼容 FastAPI 默认错误形态 {"detail": "..."} / {"detail": [...]}：
+      // 业务错误用 body.message + body.code（自定义异常处理器），但
+      // HTTPException 直接返回 detail 字段，前端要显示具体错误（如"存档主版本号不兼容"）
+      // 而不是统一的 statusText。
+      const detail = typeof body.detail === "string" ? body.detail : null;
       err = {
         code: body.code ?? "INTERNAL_ERROR",
-        message: body.message ?? resp.statusText,
+        message: body.message ?? detail ?? resp.statusText,
         retryable: body.retryable ?? false,
-        details: body.details,
+        details: body.details ?? (Array.isArray(body.detail) ? { errors: body.detail } : undefined),
       };
     } catch {
       err = {
