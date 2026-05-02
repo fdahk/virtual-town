@@ -174,6 +174,53 @@ def test_decide_falls_back_to_wander_when_no_route():
     assert decision.metadata.get("unreachable_location_id") == "loc_far"
 
 
+def test_recovery_wander_marks_target_unreachable():
+    """
+    Regression：portal 存在但 NPC 走不到（被障碍墙隔开）→ rule_agent 走
+    ``_make_recovery_or_wait`` 的 wander 分支兜底。
+
+    死循环 bug：原实现 wander 分支不带 ``unreachable_location_id``，引擎
+    不写黑名单，下个 ai_tick 又选同一目标 → 死循环 "绕行中→到达目的地"。
+
+    Fix 后：wander 分支也带 ``unreachable_location_id``，让引擎下个 tick 命中
+    黑名单走 ``_wander_within_scene_or_wait`` 的"目标暂时不可达"分支。
+    """
+    portals = {
+        "indoor": [_portal("indoor", "outdoor", 15, 15)],
+        "outdoor": [_portal("outdoor", "indoor", 0, 0)],
+    }
+    indoor = _grid("indoor", w=20, h=20)
+    # 横着一道墙 y=10，把 (5,5) 起点和 portal (15,15) 隔开
+    for x in range(0, 20):
+        indoor.block(x, 10)
+    grids = {"indoor": indoor, "outdoor": _grid("outdoor")}
+    locations = {
+        "loc_target": {
+            "id": "loc_target",
+            "scene_id": "outdoor",
+            "bounds": {"x": 5, "y": 5, "width": 2, "height": 2},
+            "entry_tiles": [{"x": 5, "y": 5}],
+        }
+    }
+    schedule = [
+        {"start": "00:00", "end": "23:59", "activity": "go", "location_id": "loc_target"}
+    ]
+    decision = decide_human_action(
+        agent_row=_agent_row(schedule=schedule),
+        state_row=_state_row("indoor", x=5, y=5),
+        world_time=datetime(2026, 5, 1, 12, 0),
+        locations=locations,
+        grids=grids,
+        portals_by_scene=portals,
+    )
+    # NPC 在 5 格内有大量空地，BFS 一定找得到 recovery → 走 wander 分支
+    assert decision.action_type == "wander"
+    # 关键断言：必须把目标加入黑名单，否则引擎下个 tick 又会选同一目标死循环
+    assert decision.metadata.get("unreachable_location_id") == "loc_target"
+    # wander 分支不应带 stuck=True（NPC 在动，不必每个 tick 都重决策）
+    assert not decision.metadata.get("stuck")
+
+
 def test_decide_skips_blacklisted_target():
     """
     传入 unreachable_location_ids → 直接跳过该 slot 的 location，进入 wander。

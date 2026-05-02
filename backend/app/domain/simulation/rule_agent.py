@@ -471,21 +471,33 @@ def _make_recovery_or_wait(
     尝试 BFS 找一个可走的邻格让 NPC 移出死区；
     完全走不通时才返回 wait。
 
-    返回 ``wait`` 时打上 ``metadata.stuck=True``（若 ``stuck_target_location_id``
-    给出，会被引擎加入不可达黑名单 + 立即重试，避免长期僵在 WAITING）。
+    无论走 wander 还是 wait 分支：只要 ``stuck_target_location_id`` 给出，
+    都会通过 ``metadata.unreachable_location_id`` 把目标加入引擎的 5 分钟
+    不可达黑名单，避免下个 ai_tick 又选同一个目标再次失败。
+
+    - **wait 分支**额外打 ``metadata.stuck=True``：完全卡死 → 引擎清
+      ``last_decision_at`` 立即重决策，避免长期僵在 WAITING。
+    - **wander 分支**不打 ``stuck`` 标记：NPC 已经在动，按正常 ai_tick
+      节奏重决策即可，黑名单已经会让下次决策避开该目标。
     """
     recovery = _recovery_tile_bfs(grid, origin, max_radius=5)
     if recovery is not None:
         path = astar(grid, origin, recovery, avoid_hazards=True)
         if path:
+            metadata: dict[str, Any] = {}
+            if stuck_target_location_id:
+                # 没找到通往真正目标的路径，但能就近兜个圈 ——
+                # 标记目标 location 不可达，避免下个 ai_tick 又原样失败
+                metadata["unreachable_location_id"] = stuck_target_location_id
             return AgentDecision(
                 action_type="wander",
                 description=description,
                 target_position=recovery,
                 path=path,
                 duration_ticks=len(path),
+                metadata=metadata,
             )
-    metadata: dict[str, Any] = {"stuck": True}
+    metadata = {"stuck": True}
     if stuck_target_location_id:
         metadata["unreachable_location_id"] = stuck_target_location_id
     return AgentDecision(

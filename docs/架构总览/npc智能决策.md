@@ -513,7 +513,7 @@ nearby_fires        → _decide_fire_response（按性格选灭火 / 围观 / �
 | 来源 | 写入时机 |
 |------|---------|
 | LLM 工具 (`move_to_location` / `request_interaction` / `go_to_entity`) | 工具执行失败时 `world_tools._mark_unreachable` 写 Redis |
-| rule_agent 结构性失败 | 在 `AgentDecision.metadata` 标 stuck → engine `_apply_decision` 推入 `_pending_unreachable` → tick 末 flush |
+| rule_agent 结构性失败 | 在 `AgentDecision.metadata` 标 `unreachable_location_id` → engine `_apply_decision` 推入 `_pending_unreachable` → tick 末 flush |
 
 key：`agent:{agent_id}:unreachable`（Redis SET，TTL 300s）
 
@@ -521,6 +521,19 @@ key：`agent:{agent_id}:unreachable`（Redis SET，TTL 300s）
 - `agent_decision._perceive` → 过滤 LLM 看到的 NPC / Location；
 - `engine._get_unreachable_locations` → 内存镜像传给 `decide_human_action`，
   规则版命中黑名单的 slot 直接转 `_wander_within_scene_or_wait`。
+
+> **wander 兜底也必须写黑名单**（2026-05-02 修复）：rule_agent 的
+> `_make_recovery_or_wait` 在找到 recovery_tile 时返回 wander 决策——这种
+> "找到了近邻空地，但走不到真正目标"的情况，**必须**在 metadata 里带
+> `unreachable_location_id`，否则下个 ai_tick 又会原样选同一目标，引发
+> "绕行→到达→绕行→到达"刷屏循环。详见
+> `docs/开发手册/debug/20260502-recovery-wander-loop.md`。
+>
+> `stuck` 与 `unreachable_location_id` 的协议：
+> - `stuck=True` → 引擎清 `last_decision_at` 立即重决策（仅用于 wait 兜底）；
+> - `unreachable_location_id` → 写 5 分钟黑名单（wander / wait 都应该带）；
+> - 两者独立：wander 分支只带 unreachable，不带 stuck（让 NPC 按 ai_tick
+>   节奏推进，避免每 tick 重复决策）。
 
 ## 7. 调参指南：让 NPC 更社交、更"过日子"
 
