@@ -332,6 +332,23 @@ class SimulationEngine:
             for o in objects
         }
 
+        # 阶段 21+：错峰初始 last_decision_at。
+        # 否则 22 NPC 启动时 last_decision_at=None，第一波 ai_tick 全员同时入队，
+        # 把队列瞬间打爆且 worker 无法均匀消费。这里按索引把每个 NPC 的"下次
+        # 可决策时间"分散到 [0, ai_interval) 仿真分钟内，让入队呈流水线节奏。
+        ai_interval = sim.ai_tick_minutes if sim is not None else 5
+        humanlike = [a for a in self._agents.values() if not a.is_player]
+        n = max(1, len(humanlike))
+        for i, a in enumerate(humanlike):
+            if a.last_decision_at is None:
+                # 让第 i 个 NPC 在 (i / n) * ai_interval 仿真分钟后才达到第一次决策窗口
+                offset_min = (i * ai_interval) / n
+                a.last_decision_at = (
+                    self._world_time
+                    - timedelta(minutes=ai_interval)
+                    + timedelta(minutes=offset_min)
+                )
+
     # ------------------------------------------------------------------
     # 主循环
     # ------------------------------------------------------------------
@@ -1745,11 +1762,19 @@ class SimulationEngine:
     async def _enqueue_decision_task(self, agent_id: str, now_dt: datetime) -> None:
         """把 agent_decision 投递到 TaskQueue。
 
-        - 幂等 key：``agent_decision:{agent_id}:{simulation_step}``，同一步同一 agent 不会重复入库。
-        - 主循环**不等待**任务执行结果；即使任务 failed，规则兜底早已给出即时行为。
+        - 幂等 key：``agent_decision:{agent_id}:{simulation_step}``，同一步同一
+          agent 不会重复入库。
+        - **决策锁去重**（阶段 21+）：入队前 ``SETNX agent:{id}:decision_lock``，
+          TTL = ``agent_decision_deadline_seconds + handler timeout``。锁持有
+          期间跳过 enqueue 且**不更新** ``last_decision_at``，让下一 tick 立刻
+          重试，避免 22 NPC 在 deadline 内堆积大量同一 agent 的决策任务。
+        - 主循环**不等待**任务执行结果；即使任务 failed，规则兜底早已给出
+          即时行为。
         - 任务完成后 worker 的工具调用会改写 AgentState / AgentAction，
           下一轮 world tick 通过 ``reload_from_db`` 或状态同步感知。
         """
+        from app.core.config import get_settings as _get_settings
+        from app.core.redis_client import get_redis, key_agent_decision_lock
         from app.domain.tasks.queue import get_task_queue
 
         queue = get_task_queue()
@@ -1758,19 +1783,46 @@ class SimulationEngine:
         agent = self._agents.get(agent_id)
         if agent is None or agent.is_player:
             return
-        await queue.enqueue(
-            task_type="agent_decision",
-            payload={
-                "agent_id": agent_id,
-                "simulation_id": self._sim_id(),
-                "world_time": now_dt.isoformat(),
-            },
-            entity_id=agent_id,
-            simulation_id=self._sim_id(),
-            simulation_step=self._step,
-            priority=5,
-            deadline_seconds=60.0,
+
+        settings = _get_settings()
+        deadline = float(settings.agent_decision_deadline_seconds)
+        # 锁 TTL = deadline + handler 默认超时 (45s) + 安全余量 (15s)。
+        # 即使 worker 全卡死，锁也会在该时间内自动过期，引擎自然恢复入队。
+        lock_ttl = int(deadline + 60)
+
+        redis_svc = get_redis()
+        acquired = await redis_svc.set_nx(
+            key_agent_decision_lock(agent_id),
+            "1",
+            ttl_seconds=lock_ttl,
         )
+        if not acquired:
+            # 上一次决策仍在 pending/running，跳过本次入队；不更新
+            # last_decision_at，让下一 tick 继续尝试（锁到期后立刻能拿到）
+            return
+
+        try:
+            await queue.enqueue(
+                task_type="agent_decision",
+                payload={
+                    "agent_id": agent_id,
+                    "simulation_id": self._sim_id(),
+                    "world_time": now_dt.isoformat(),
+                },
+                entity_id=agent_id,
+                simulation_id=self._sim_id(),
+                simulation_step=self._step,
+                priority=5,
+                deadline_seconds=deadline,
+            )
+        except Exception:
+            # 入队失败：主动释放锁，让下个 tick 能立即重试
+            try:
+                await redis_svc.delete(key_agent_decision_lock(agent_id))
+            except Exception:
+                pass
+            raise
+
         agent.last_decision_at = now_dt
         agent.dirty = True
 

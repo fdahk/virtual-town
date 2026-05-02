@@ -210,6 +210,8 @@ async def _execute_task(task_id: str) -> dict[str, Any]:
                 )
             )
             await _sess.commit()
+        # 阶段 21+：deadline 超时也要释放决策锁，避免引擎被锁卡住直到 TTL 过期
+        await _release_agent_decision_lock(task.id)
         await get_observer().record_task_status(
             task_id=task.id,
             from_status=PENDING,
@@ -393,6 +395,7 @@ async def _mark_succeeded(
             )
         )
         await session.commit()
+    await _release_agent_decision_lock(task_id)
     await get_observer().record_task_status(
         task_id=task_id,
         from_status=RUNNING,
@@ -423,6 +426,7 @@ async def _mark_failed(
             values["result"] = result
         await session.execute(update(Task).where(Task.id == task_id).values(**values))
         await session.commit()
+    await _release_agent_decision_lock(task_id)
     await get_observer().record_task_status(
         task_id=task_id,
         from_status=RUNNING,
@@ -431,6 +435,36 @@ async def _mark_failed(
         error_code=error_code,
         message=message,
     )
+
+
+async def _release_agent_decision_lock(task_id: str) -> None:
+    """把 ``agent:{agent_id}:decision_lock`` 主动删掉，让引擎立刻能重新入队。
+
+    阶段 21+：入队前的 SETNX 锁是为了去重 22 NPC 短时间内对同一 agent 反复入队
+    的洪流。一旦任务真的执行完（无论成功 / 失败），就应该立刻释放锁，让下一次
+    AI tick 按 ``ai_tick_minutes`` 间隔正常入队，而不是等到锁的 TTL 自然过期。
+
+    若该任务不是 agent_decision 类型，直接返回；任何异常都吞掉，不影响主流程。
+    """
+    from app.db.session import get_session_factory
+
+    async with get_session_factory()() as session:
+        task = await session.get(Task, task_id)
+    if task is None or task.task_type != "agent_decision":
+        return
+    agent_id = (
+        (task.payload or {}).get("agent_id")
+        if isinstance(task.payload, dict)
+        else None
+    ) or task.entity_id
+    if not agent_id:
+        return
+    try:
+        from app.core.redis_client import get_redis, key_agent_decision_lock
+
+        await get_redis().delete(key_agent_decision_lock(agent_id))
+    except Exception:
+        logger.debug("release decision lock failed", exc_info=True)
 
 
 async def _requeue_for_retry(

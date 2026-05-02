@@ -85,11 +85,25 @@ class Settings(BaseSettings):
     task_queue_default: str = Field(default="vt:default")
     task_queue_high: str = Field(default="vt:high")
     task_queue_low: str = Field(default="vt:low")
-    # worker 进程并发（同一 worker 容器内起的 RQ worker 数量；
-    # 单 worker 已足够 MVP，扩展时直接加 ``worker`` 容器副本数即可）
+    # worker 进程数量（容器副本数，扩展时调 ``docker compose up --scale worker=N``）。
+    # 单容器内的并发槽位见 ``task_queue_worker_concurrency``。
     task_queue_worker_count: int = Field(default=1)
+    # 单 worker 容器内的并发槽位数（阶段 21+：自定义 async 并发模型）。
+    # 22 NPC 的 ``agent_decision`` 任务以 LLM I/O 为主，单进程跑 16 个并发槽位
+    # 把吞吐从 ~0.2 jobs/s 拉到 ~3.2 jobs/s，给 LLM 慢响应抖动留出舒适余量
+    # （再叠加决策锁去重，22 NPC 入队稳态会自适应到与吞吐对齐）。
+    #
+    # 调参约束：本字段 × (1-2 session/任务) 必须 ≤ ``app/db/session.py`` 的
+    # ``pool_size + max_overflow``（当前 20+20=40），否则任务会卡在等 DB 连接。
+    # 当前 16 槽位 × 2 ≈ 32 个连接，仍有 8 个余量给 ttl_worker / scheduler 等。
+    # 若要再扩到 32 槽位，需同步把 pool_size / max_overflow 一起调到 32/32。
+    task_queue_worker_concurrency: int = Field(default=16)
     # 兼容旧字段名（.env 中可能还写着 TASK_QUEUE_CONCURRENCY）
     task_queue_concurrency: int = Field(default=2)
+    # ``agent_decision`` 任务在队列中等待的 deadline（秒）。
+    # 阶段 21+ 调参：60 → 90，给并发 worker + 决策锁的稳态留出余量；
+    # 同时仍保证已严重过期的决策不会浪费 LLM 调用。
+    agent_decision_deadline_seconds: float = Field(default=90.0)
     # 观测
     observability_flush_interval: float = Field(default=1.5)
     observability_batch_size: int = Field(default=200)

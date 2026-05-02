@@ -49,6 +49,86 @@
 - `busy_until` 未到 → 跳过；
 - 命中以上条件后才进入决策路径，最多 5% 左右的 NPC 在同一 tick 内决策。
 
+## 1.5 端到端执行架构（决策的物理流转）
+
+上面的"决策栈"是逻辑视角；这一节讲"物理视角"——决策实际发生在哪些**进程**之间、
+状态写到哪里、谁是单写者。**这是排查"NPC 为什么不动 / 没记忆"等并发问题的根基**。
+
+### 1.5.1 进程拓扑
+
+```text
+┌──────────────────────┐  ┌──────────────────────┐  ┌────────────────┐  ┌──────────────┐
+│  backend (uvicorn)   │  │  worker × N 副本     │  │  postgres      │  │  redis       │
+│  ──────────────────  │  │  ──────────────────  │  │  ────────────  │  │  ──────────  │
+│  FastAPI HTTP+WS     │  │  自定义并发 RQ Worker │  │  pgvector 16   │  │  队列+缓存   │
+│  SimulationEngine    │  │  (asyncio + Sem)     │  │  业务真相 SoR  │  │  锁+pub/sub  │
+│  TaskQueue.enqueue   │  │  decide_with_llm     │  │                │  │              │
+│  规则版兜底           │  │  ToolExecutor        │  │                │  │              │
+└────────┬─────────────┘  └────────┬─────────────┘  └───────┬────────┘  └──────┬───────┘
+         │ enqueue                 │ BLPOP                  │ asyncpg          │ redis-py
+         │ (vt:high/default/low)   │                        │                  │
+         └─────────────────► redis ◄────────────────────────┼──────────────────┘
+         │                                                  │
+         └──────── postgres ◄────────────────────────────────┘
+                  (agents / memories / tasks / world_events / ...)
+```
+
+### 1.5.2 各进程职责
+
+| 进程 | 副本数 | 职责 | 不能做什么 |
+|------|--------|------|------------|
+| **backend** | **1**（单写者） | 推进 world_time；维护 EngineAgent 内存镜像；处理玩家输入；把 LLM 决策**入队**（不直接调 LLM）；广播 WebSocket | **不调 LLM**；不能起多份（会破坏 world_time 单调性） |
+| **worker** | 1..N（默认 1） | `BLPOP` 队列；并发跑 `decide_with_llm`、reflection、consolidation、rumination 等任务；通过工具修改 DB | **不持有引擎实例**；不能拿 EngineAgent 内存（必须通过 DB / Redis） |
+| **postgres** | 1 | 业务真相唯一源（SoR）：agents / memories / tasks / world_events / relationships … | — |
+| **redis** | 1 | RQ 队列（`vt:high/default/low`）；缓存（embedding / unreachable）；分布式锁（决策锁） | — |
+
+> 关键约束：**有状态层（postgres、redis）单实例 + 单写者引擎**保证一致性；
+> **无状态计算层（worker）**才能任意横向扩展。
+
+### 1.5.3 一次决策的端到端时序
+
+```text
+T+0.0s  backend 主循环 _decide_all
+        ├─ 满足 ai_tick 条件的 NPC：先跑规则兜底（保证本轮不静止）
+        └─ 调 _enqueue_decision_task：
+              SETNX agent:{id}:decision_lock TTL=150
+              insert tasks (idempotency_key=agent_decision:{id}:{step})
+              RPUSH vt:high <task_id>
+        ── 主循环立即返回，绝不等 LLM ──
+
+T+?ms   某个 worker 协程槽 (sem) 拿到许可
+        ├─ BLPOP vt:high → task_id
+        ├─ Job.fetch
+        ├─ runner._execute_task(task_id)
+        │     └─ decide_with_llm(agent_id, world_time)
+        │           Perceive → Retrieve → Plan(LLM HTTP) → Execute(tools)
+        ├─ 工具直接 update agents / memories / world_events
+        ├─ task 状态 → SUCCEEDED
+        └─ DEL agent:{id}:decision_lock         ← 立即释放锁
+
+T+?+next_tick
+        backend 主循环再次跑：
+        - reload_from_db 把 worker 改过的 agent 状态加载回 EngineAgent
+        - 走 path / 触发新一轮 ai_tick
+```
+
+**两个要点**：
+- 主循环永远不阻塞——LLM 慢与否都不会卡 world_tick；本轮的规则兜底保证 NPC 至少有"即时行为"。
+- worker 的副作用通过 **DB**（持久状态）+ **Redis**（瞬态信号）回传给引擎，没有任何"内存共享 / RPC 回调"——这正是允许 worker 横向扩展的前提。
+
+### 1.5.4 状态的单一真相源（SoR）
+
+| 状态 | 单一真相源 | 谁能写 | 怎么读 |
+|------|-----------|--------|--------|
+| Agent.state / position / busy_until | Postgres `agents` | 引擎单写、worker 通过工具写 | 引擎 reload_from_db、worker session.get |
+| Memory（含向量） | Postgres `memories` | worker / 投影器写 | MemoryService.search |
+| 决策任务 | Postgres `tasks` + Redis 队列 | engine 入队、worker 改状态 | Observer / API |
+| 决策"在飞"状态 | Redis `agent:{id}:decision_lock` | engine SETNX、runner DEL | engine SETNX 失败即知道有人在飞 |
+| 不可达黑名单 | Redis `agent:{id}:unreachable` | 工具 / 引擎写 | engine 内存镜像 + perceive |
+| 世界事件 | Postgres `world_events` + Redis pub/sub | engine 单写 | WS 广播 / event_projector |
+
+只要每条状态有且只有一个写者方向，就不会有"多副本同步"问题——这是我们能放心起多个 worker 副本的基础。
+
 ## 2. LLM 路径：Perceive → Retrieve → Plan → Execute
 
 主决策入口 `app/llm/agent_decision.py::decide_with_llm`。
@@ -130,15 +210,190 @@ memory_writes（防止 LLM 暴走）。
 - 工具的副作用直接修改 `EngineAgent` / DB / Redis；引擎下个 tick 看到。
 - 失败工具不会让整个决策失败，只会被记录到 `ToolCallRecord`。
 
-### 2.5 同步 vs 异步
+### 2.5 决策的执行模型：同步 / 异步 / 并发 / 副本
+
+这一节回答 4 个常见的疑问：
+- LLM 是在哪个进程里被调用的？
+- worker 是单线程的吗？怎么并发的？
+- 为什么用 asyncio 而不是多线程 / 多进程？
+- 横向扩 worker 副本会不会导致状态冲突？
+
+#### 2.5.1 同步模式 vs 异步模式
 
 | 模式 | 何时用 | 行为 |
 |------|--------|------|
-| `TASK_QUEUE_MODE=async`（默认） | 生产 / dev | 主循环投递 `agent_decision` 任务到 RQ `vt:default`；worker 进程消费并跑 LLM；本轮 NPC 仍走规则兜底确保不静止；下一 tick 看到 worker 写回的状态。 |
+| `TASK_QUEUE_MODE=async`（默认） | 生产 / dev | 主循环投递 `agent_decision` 任务到 RQ `vt:high`；worker 进程消费并跑 LLM；本轮 NPC 仍走规则兜底确保不静止；下一 tick 看到 worker 写回的状态。 |
 | `TASK_QUEUE_MODE=sync` | 回归测试 / e2e | 主循环内直接 `await decide_with_llm`，全失败时再回退规则。 |
 
 异步模式下 worker 进程**不持有 SimulationEngine 实例**，所以 `decide_with_llm`
 中需要触达引擎的部分（如 emotion 同步）用 try/except 容错，避免炸 worker。
+
+#### 2.5.2 worker 的并发模型（阶段 21+）
+
+文件：`app/domain/tasks/worker.py`。
+
+历史包袱：阶段 12 的 worker 跑的是 `rq.SimpleWorker`，串行消费——每次 LLM 调用
+5–15s，整个 worker 吞吐只有 0.1–0.2 jobs/s，22 NPC × ~37 enqueues/s 的入队
+节奏直接把队列打爆，绝大多数任务在 `deadline_seconds` 内被丢弃。玩家观感：
+**只有少数 NPC 真正决策，其它 NPC 反复同样行为且没有记忆**。
+
+阶段 21+ 改造为**单进程 + N 个 asyncio 协程槽**：
+
+```python
+# 极简伪代码（实际见 worker._async_worker_main）
+sem = asyncio.Semaphore(concurrency)             # 默认 16 张"许可证"
+
+async def _execute_one(task_id, job):
+    async with sem:                               # 进门要拿许可证；满了就排队
+        await runner._execute_task(task_id)       # 调 LLM、读写 DB
+
+async def _async_worker_main():
+    while not stopping:
+        if len(pending) >= concurrency:
+            await asyncio.wait(pending, FIRST_COMPLETED)   # 满载就等一个完
+            continue
+        job_id = await asyncio.to_thread(redis.blpop, queues, 1)
+        asyncio.create_task(_execute_one(task_id, job))    # 不等它完，立即拉下一个
+```
+
+附加组件：
+- **Mini Scheduler**（`_mini_scheduler_loop`）：每 1s 把 `ScheduledJobRegistry` 里
+  到期的 `enqueue_in` job 回推到普通队列，让 `enqueue_retry(delay_seconds>0)` 可用
+  （RQ 自带的 scheduler 依赖 `Worker.work(with_scheduler=True)`，我们已不再调用）。
+- **Graceful drain**：收到 SIGINT/SIGTERM 后停止 BLPOP，再等已在飞的协程最多 30s
+  完成，避免任务被强切。
+- **TTL Worker 跑在同一 loop**：避免 SQLAlchemy AsyncEngine 跨 loop 报
+  "Future attached to a different loop"（见
+  `docs/开发手册/debug/20260501-task-queue-rq-asyncio-loop.md`）。
+
+#### 2.5.3 关键概念辨析：进程 / 线程 / 协程槽位
+
+| 名词 | 含义 | 我们的项目里 |
+|------|------|------------|
+| **进程**（process） | 一个独立的 OS 程序实例 | `backend`（FastAPI+引擎，1 份）、`worker`（队列消费者，1..N 份）、`postgres`、`redis` 各是一个独立进程 |
+| **线程**（thread） | 进程内的执行流，共享内存；受 Python GIL 约束 | 我们 worker 进程**只用一条主线程**跑事件循环，BLPOP 用 `asyncio.to_thread` 短暂借线程 |
+| **协程**（coroutine） | `async def` 函数对象，由事件循环切换；纳秒级开销 | 每个 `agent_decision` 任务是一个协程 |
+| **协程槽位**（asyncio Semaphore） | 限制"同时在飞"的协程数量 | `Semaphore(16)` = 同进程内最多 16 个 LLM 决策并行 |
+
+直观对比：
+
+```text
+旧 SimpleWorker（同进程、单线程、串行）：
+  [LLM 1 ......][LLM 2 ......][LLM 3 ......]
+  0s──10s        20s         30s
+  吞吐 ~0.1 jobs/s
+
+新并发 worker（同进程、单线程、16 协程槽）：
+  [LLM  1 ........]
+  [LLM  2 .........]
+  [LLM  3 ......]
+  ...
+  [LLM 15 .........]
+  [LLM 16 ........]
+  0s ──── 10s
+  吞吐 ~1.6-3.2 jobs/s（×16，受 LLM 端 RPM 约束）
+```
+
+LLM 调用 90% 时间都在等 HTTP 响应、CPU 几乎闲置。同一线程内塞 8 个 await
+点，事件循环在等待时切别人，对总耗时几乎没影响、吞吐近线性 ×N。
+
+#### 2.5.4 为什么是 asyncio 而不是多线程 / 多进程
+
+| 方案 | 优点 | 我们项目里的劣势 |
+|------|------|----------------|
+| 多进程 | 绕开 GIL，CPU 密集任务并行 | LLM 是 I/O 密集不是 CPU 密集；每进程 50-100MB、独占 DB 连接池、单独 LLM client，重 |
+| 多线程 | 切换成本低，I/O 时释放 GIL | 我们整套 I/O 栈是 async-native（asyncpg / httpx.AsyncClient / dashscope async SDK），同步版本要么不存在要么需要桥接；线程 + asyncio 混跑容易踩"future 跨 loop"问题 |
+| **asyncio 协程槽位** ✅ | 每协程几 KB、纳秒级切换；与现有栈天然匹配；同 loop 内 SQLAlchemy / Redis 客户端可复用连接池 | 不能用于 CPU 密集（pgvector / 计算 BFS 路径都已经在 DB 侧或 numpy 层处理了，不在 worker 进程里） |
+
+> 一句话：**asyncio 是我们这套技术栈的本命并发模型**——主循环、tools、DB、Redis、HTTP 全是 async/await 链路，多线程/多进程都是绕路。
+
+需要更高吞吐时的扩容路径：
+1. **垂直**：`TASK_QUEUE_WORKER_CONCURRENCY=16 → 32 → 64`，单进程更多协程槽；
+   注意 ≥ 32 时必须同步把 `app/db/session.py` 的 `pool_size + max_overflow`
+   一起扩到 ≥ 该数值的 2 倍，否则任务会卡在等 DB 连接。
+2. **水平**：`docker compose up --scale worker=N`，多个 worker 容器各自跑 N 个槽位，
+   通过共享 Redis 队列自然分流（BLPOP 原子，不会重复消费）；
+3. 上限受 LLM provider RPM 与 PostgreSQL `max_connections` 约束。
+
+#### 2.5.5 决策锁：同 NPC 同时只允许一份决策在飞
+
+光扩 worker 还不够——22 NPC × `1 / ai_tick_minutes` 的入队节奏（≈37/s 仿真倍速下）
+仍可能超过吞吐。我们额外用决策锁限制**入队速率**：
+
+`engine._enqueue_decision_task` 在 enqueue 前先 `SETNX agent:{id}:decision_lock`
+(TTL = `agent_decision_deadline_seconds + 60`)：
+
+```text
+SETNX 失败 → 跳过本次入队 + 不更新 last_decision_at → 下一 tick 再试
+SETNX 成功 → insert tasks（幂等键去重） + RPUSH vt:high + 更新 last_decision_at
+runner 完成 / deadline 触发 / 失败 → DEL 锁 → 下一 tick 立即可入队
+worker 进程崩溃 → 锁 TTL 自动过期，引擎自然恢复
+```
+
+锁的语义是**"这个 NPC 已经有一份决策在飞"**，叠加 task 表的幂等键
+`agent_decision:{id}:{step}` 形成双保险——SETNX 抢的是"飞行中"窗口、幂等键抢的是
+"同一仿真步入库"窗口，两者覆盖所有重复情况。
+
+效果：22 NPC 默认配置下入队稳态从 37/s 自适应压到 ~1.6-3.2/s（= 并发槽 × 平均完成率），
+与吞吐对齐——所有 NPC 都能按 `ai_tick_minutes` 节奏拿到 LLM 决策与 memory_writes，
+不再有"哑巴 NPC"。
+
+#### 2.5.6 启动错峰
+
+仅有决策锁还不够。所有 NPC 启动时 `last_decision_at = None`，第一个 tick 就**全员
+同时**满足"AI tick"条件。哪怕队列总量不爆，第一波 burst 也会让前 16 个 NPC 把锁
+全占了，剩下的等 TTL（150s+）才轮到，体感"前 16 个动得快、后面像睡着了"。
+
+`engine._load_state` 末尾把 22 NPC 的初始 `last_decision_at` 按索引错开到
+`[world_time - ai_interval, world_time)` 区间内：
+
+```python
+ai_interval = sim.ai_tick_minutes
+humanlike = [a for a in self._agents.values() if not a.is_player]
+n = max(1, len(humanlike))
+for i, a in enumerate(humanlike):
+    if a.last_decision_at is None:
+        offset_min = (i * ai_interval) / n
+        a.last_decision_at = (
+            self._world_time - timedelta(minutes=ai_interval)
+            + timedelta(minutes=offset_min)
+        )
+```
+
+第一波决策呈流水线节奏分散到一个 `ai_tick_minutes` 区间内，并发槽位从启动开始就
+能均匀填满，没有空转也没有挤爆。
+
+#### 2.5.7 worker 多副本的状态一致性
+
+worker 可以横向扩到 N 副本。下表说明为什么不会出现"多副本同步问题"：
+
+| 风险 | 怎么避免 |
+|------|---------|
+| 同一任务被两个 worker 拿到 | Redis `BLPOP` 是原子操作，list 弹一次只给一个客户端 |
+| 同一 NPC 同时被两份决策处理 | 决策锁 SETNX 是原子的，`tasks` 表的幂等键是唯一约束，重复入队会被 DB 拒掉 |
+| 两个 worker 同时改同一 NPC 字段 | 每个工具用独立 AsyncSession 事务；冲突由 Postgres 行锁/隔离级别处理；工具内先 `await session.refresh(agent)` 再写 |
+| 缓存（embedding / unreachable）跨副本不一致 | 缓存层一律放 Redis，单实例；副本只是无状态的"读 / 改 / 写"通道 |
+| 决策结果回传给 backend | 全部走 DB——backend 下个 tick `reload_from_db` 自然看到 |
+
+**关键设计**：所有"会被多写者修改"的状态都收敛到 Postgres / Redis 这两个有状态层；
+backend 与 worker 都是无状态计算单元，只读 / 改 / 写共享存储，不互相 RPC、不
+共享内存。这就是允许 worker 任意 scale 的根因。
+
+#### 2.5.8 为什么不能"开多份 SimulationEngine"
+
+有人可能会想："既然 worker 能多副本，为什么不让 backend 也起多份引擎来分摊压力？"
+
+不行。引擎在我们架构里是**世界状态的唯一单写者**：
+- `world_time` 由它单调推进；多份引擎 tick 同一个仿真会让 world_time 分裂；
+- agents 内存镜像、邂逅扫描、WebSocket 广播全在引擎内部；
+- `_persist_tick` 写 DB 时多写者会互相覆盖。
+
+**而且也没必要**——LLM 决策从来不在引擎里跑，引擎只入队不调 LLM。"扩并发"的
+正确姿势永远是扩 worker（垂直加协程槽位 / 水平加副本），而不是扩引擎。
+
+将来真正需要"扩仿真"的场景是支持多个独立游戏世界（多用户、多存档同时运行），
+方案是按 `simulation_id` 分片——每个仿真自己一份引擎实例、共享同一 worker pool，
+而不是同一仿真起两份引擎。
 
 ## 3. 工具目录（按用途分组）
 
@@ -346,6 +601,18 @@ NPC 一直 `WAITING` / `IDLE` 不动？
 4. 看 `agent:{id}:unreachable`：是否日程目标全被拉黑。
 5. 看 `tool_calls` 表：最近调用的工具是否全部失败。
 6. 看 RQ 队列：是不是 worker 挂了导致 LLM 决策不回写。
+7. 看 Redis `agent:{id}:decision_lock`：锁是否被遗留（worker 崩溃但未清理）；
+   `redis-cli ttl agent:<id>:decision_lock` 看剩余秒数；锁 TTL = deadline+60s，
+   理论上不会卡 NPC > ~150s。
+
+22 NPC 多数表现一致 / 没有记忆产生？典型症状即"决策吞吐被串行 worker 卡死"。
+1. 看 `/api/observability/tasks?type=agent_decision&status=failed`：是不是大量
+   `TASK_DEADLINE_EXCEEDED`。
+2. 看 worker 日志启动行：`concurrent rq worker ready concurrency=N`，N 应 ≥ 8（默认 16）。
+3. 调 `TASK_QUEUE_WORKER_CONCURRENCY` 与 `AGENT_DECISION_DEADLINE_SECONDS`，
+   并视情况扩 `docker compose up --scale worker=2`；
+   注意 concurrency ≥ 32 时必须同步扩 DB 池（`session.py` 的 `pool_size + max_overflow`）。
+4. 复盘见 `docs/开发手册/debug/20260502-npc-decision-concurrency.md`。
 
 NPC 不社交？
 1. 看 `agent.social_need`：是不是低于阈值。

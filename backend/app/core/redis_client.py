@@ -134,6 +134,24 @@ class RedisService:
         except Exception:
             return 0
 
+    async def set_nx(self, key: str, value: str, *, ttl_seconds: int) -> bool:
+        """SETNX with TTL：原子设置 key 并返回是否首次设置成功。
+
+        Redis 不可用时返回 ``True``（best-effort），避免因为缓存层不可用而把
+        业务流量直接掐断（与本类其它方法的 best-effort 语义一致）。
+
+        典型用法：分布式锁。``ttl_seconds`` 既保证锁不死，也避免 Redis 单点故障
+        时锁永驻。
+        """
+        client = await self._ensure_client()
+        if client is None:
+            return True
+        try:
+            ok = await client.set(key, value, ex=ttl_seconds, nx=True)
+            return bool(ok)
+        except Exception:
+            return True
+
     async def expire(self, key: str, seconds: int) -> bool:
         client = await self._ensure_client()
         if client is None:
@@ -305,6 +323,26 @@ def key_agent_unreachable(agent_id: str) -> str:
     return f"agent:{agent_id}:unreachable"
 
 
+def key_agent_decision_lock(agent_id: str) -> str:
+    """决策"进行中"锁：agent:{id}:decision_lock。
+
+    阶段 21+：22 NPC 每 ``ai_tick_minutes`` 仿真分钟（≈ 0.6 真实秒）就会触发一次
+    enqueue。SimpleWorker 时代单线程 LLM 调用 5-15s/次，导致同一 NPC 的 N 份
+    决策任务在队列里堆积，超过 ``deadline_seconds`` 后批量被丢弃，玩家观感即
+    "只有少数 NPC 在动"。
+
+    新增决策锁：入队前 SETNX，TTL = handler 默认超时 + 余量；锁持有期间引擎
+    跳过该 NPC 的 enqueue，且**不更新** ``last_decision_at`` —— 等锁到期或被
+    handler 主动释放后，下个 tick 立刻重试。
+
+    锁释放时机：
+    - handler 成功完成 → ``runner._mark_succeeded`` 释放；
+    - handler 失败 / 超时 / deadline 过期 → ``runner._mark_failed`` 释放；
+    - 进程崩溃 → 由 TTL 自动过期（默认 60s）。
+    """
+    return f"agent:{agent_id}:decision_lock"
+
+
 def key_embedding_cache(text_hash: str) -> str:
     """Embedding 向量缓存：embed:{text_hash}。
     相同文本的 embedding 结果缓存 1 小时，减少重复 API 调用。
@@ -315,6 +353,7 @@ def key_embedding_cache(text_hash: str) -> str:
 __all__ = [
     "RedisService",
     "get_redis",
+    "key_agent_decision_lock",
     "key_agent_runtime",
     "key_agent_unreachable",
     "key_dialogue_recent",
