@@ -28,8 +28,8 @@ export function NewGameWizard({ onCancel, onCreated }: Props) {
 
   // 世界参数
   const [seed, setSeed] = useState<number>(42);
-  const [width, setWidth] = useState<number>(120);
-  const [height, setHeight] = useState<number>(90);
+  const [width, setWidth] = useState<number>(80);
+  const [height, setHeight] = useState<number>(60);
 
   // 模板与 art 目录
   const [art, setArt] = useState<ArtCatalog | null>(null);
@@ -48,14 +48,17 @@ export function NewGameWizard({ onCancel, onCreated }: Props) {
   useEffect(() => {
     (async () => {
       try {
-        const [tpl, catalog] = await Promise.all([
+        const [tpl, catalog, worldDef] = await Promise.all([
           api.getNpcTemplates(),
           api.getArtCatalog(),
+          api.getWorldDefaults(),
         ]);
         setHumans(tpl.humans as unknown as NPCDraft[]);
         setAnimals(tpl.animals as unknown as NPCDraft[]);
         setPlayer(tpl.player as unknown as NPCDraft);
         setArt(catalog as unknown as ArtCatalog);
+        setWidth(worldDef.outdoor_width);
+        setHeight(worldDef.outdoor_height);
       } catch (err) {
         setError((err as { message?: string }).message ?? "无法加载默认模板");
       }

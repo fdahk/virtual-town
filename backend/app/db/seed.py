@@ -1,7 +1,7 @@
 """种子数据脚本。
 
 阶段 21：从硬编码 22 NPC + 单地图迁移到 ``world_gen`` 参数化生成器。
-- 默认走 ``GenerationConfig.default()``：22 NPC + 默认 120×90 地图
+- 默认走 ``GenerationConfig.default()``：22 NPC + 默认室外尺寸（``WORLD_GEN_OUTDOOR_*``）
 - ``--if-empty``：DB 没 agent 时才执行，避免反复刷数据
 - ``--seed N``：固定 RNG 种子，用于复现/测试
 

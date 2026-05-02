@@ -1,4 +1,5 @@
 import Phaser from "phaser";
+import { AGENT_MOVE_TWEEN_EASE, getAgentMoveTweenMs } from "../agentMotion";
 import { eventBus, type NaturalEffectPayload } from "../eventBus";
 import {
   loadManifests,
@@ -467,6 +468,11 @@ export class TownScene extends Phaser.Scene {
   private renderObjects(dataset: SceneDataset): void {
     const kenney = this.manifests?.tilesets.tilesets.kenney_tiny_town;
     const dungeon = this.manifests?.tilesets.tilesets.kenney_tiny_dungeon;
+    // 语义名 → tile_frame 反查表（manifest 维护，目前仅 kenney_tiny_town）。
+    // world_gen/outdoor.py 室外（树/护栏/告示牌）写的是 state.tile_frame_overlay
+    // 字符串名（"tree_pine" / "fence_h" / ...），由这里反查为数字帧。
+    // 设计上比强制后端写死帧号更易维护——manifest 改一次，前后端一起生效。
+    const overlayTiles = this.manifests?.tilesets.overlay_tiles ?? {};
 
     for (const obj of dataset.objects) {
       const objW = obj.size?.width ?? 1;
@@ -476,7 +482,15 @@ export class TownScene extends Phaser.Scene {
       const px = obj.position.x * DISPLAY_TILE;
       const py = obj.position.y * DISPLAY_TILE;
 
-      const tileFrame = typeof obj.state?.tile_frame === "number" ? (obj.state.tile_frame as number) : undefined;
+      // 优先级：state.tile_frame（数字）> state.tile_frame_overlay（语义名 → manifest 反查）
+      let tileFrame =
+        typeof obj.state?.tile_frame === "number" ? (obj.state.tile_frame as number) : undefined;
+      if (tileFrame === undefined) {
+        const overlayName = obj.state?.tile_frame_overlay as string | undefined;
+        if (overlayName && overlayName in overlayTiles) {
+          tileFrame = overlayTiles[overlayName];
+        }
+      }
       const tilesetKey = (obj.state?.tileset as string | undefined) ?? "kenney_tiny_town";
       const stateColor = typeof obj.state?.color === "number" ? (obj.state.color as number) : undefined;
       const tags: string[] = Array.isArray(obj.tags) ? (obj.tags as string[]) : [];
@@ -933,12 +947,16 @@ export class TownScene extends Phaser.Scene {
 
     const targetX = payload.x * DISPLAY_TILE + DISPLAY_TILE / 2;
     const targetY = payload.y * DISPLAY_TILE + DISPLAY_TILE / 2;
+    const moveMs = getAgentMoveTweenMs();
+    // 新 delta 到达时杀掉旧 tween，避免多条 ease 叠加造成顿挫
+    this.tweens.killTweensOf(node.sprite);
+    this.tweens.killTweensOf(node.label);
     this.tweens.add({
       targets: node.sprite,
       x: targetX,
       y: targetY,
-      duration: 260,
-      ease: "Sine.easeInOut",
+      duration: moveMs,
+      ease: AGENT_MOVE_TWEEN_EASE,
     });
     const m2 = this.manifests;
     const SPRITE_ORIGIN_Y2 = 0.75;
@@ -950,11 +968,11 @@ export class TownScene extends Phaser.Scene {
       targets: node.label,
       x: targetX,
       y: targetY - labelAbove2,
-      duration: 260,
-      ease: "Sine.easeInOut",
+      duration: moveMs,
+      ease: AGENT_MOVE_TWEEN_EASE,
     });
     // 阶段 19：气泡跟随移动 + 状态映射
-    this.bubbles?.tweenTo(payload.agentId, targetX, targetY - labelAbove2 - 6, 260);
+    this.bubbles?.tweenTo(payload.agentId, targetX, targetY - labelAbove2 - 6, moveMs);
     const variant = mapStateToBubble(payload.state);
     if (variant) {
       this.bubbles?.show(payload.agentId, variant);

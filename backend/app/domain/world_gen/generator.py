@@ -10,6 +10,7 @@ import uuid
 from dataclasses import dataclass, field
 from typing import Any
 
+from app.core.config import get_settings
 from app.db.templates.npc_defaults import (
     DEFAULT_ANIMAL_TEMPLATES,
     DEFAULT_HUMAN_TEMPLATES,
@@ -36,13 +37,21 @@ from app.domain.world_gen.types import (
 )
 
 
+def _default_outdoor_width() -> int:
+    return get_settings().world_gen_outdoor_default_width
+
+
+def _default_outdoor_height() -> int:
+    return get_settings().world_gen_outdoor_default_height
+
+
 @dataclass
 class GenerationConfig:
     """新游戏生成参数。"""
 
     seed: int = 42
-    outdoor_width: int = 120
-    outdoor_height: int = 90
+    outdoor_width: int = field(default_factory=_default_outdoor_width)
+    outdoor_height: int = field(default_factory=_default_outdoor_height)
     humans: list[AgentTemplate] = field(default_factory=list)
     animals: list[AgentTemplate] = field(default_factory=list)
     player: AgentTemplate | None = None
@@ -50,11 +59,9 @@ class GenerationConfig:
 
     @classmethod
     def default(cls, seed: int = 42) -> "GenerationConfig":
-        """默认 22 NPC + 默认玩家 + 120×90。"""
+        """默认 22 NPC + 默认玩家 + 配置中的室外地图尺寸。"""
         return cls(
             seed=seed,
-            outdoor_width=120,
-            outdoor_height=90,
             humans=list(DEFAULT_HUMAN_TEMPLATES),
             animals=list(DEFAULT_ANIMAL_TEMPLATES),
             player=DEFAULT_PLAYER_TEMPLATE,
@@ -82,14 +89,17 @@ def generate_world(config: GenerationConfig) -> WorldPlan:
     plan.buildings = buildings
     plan.homes = homes
 
+    w, h = config.outdoor_width, config.outdoor_height
     plan.scenes.append({
         "id": plan.outdoor_scene_id,
         "name": "小镇室外",
         "scene_type": "outdoor",
-        "width": config.outdoor_width,
-        "height": config.outdoor_height,
+        "width": w,
+        "height": h,
         "tile_size": 32,
-        "description": "120×90 大地图：北区河岸住宅、中区商业服务、南区农场森林。",
+        "description": (
+            f"{w}×{h} 室外地图：北区河岸住宅、中区商业服务、南区农场森林。"
+        ),
     })
 
     # ───── 2. 室外装饰物 ─────

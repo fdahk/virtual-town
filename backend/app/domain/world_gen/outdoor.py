@@ -337,7 +337,8 @@ def populate_outdoor_objects(
         if tiles[y * width + x]["terrain"] == "grass":
             tiles[y * width + x]["terrain"] = "grass_flower"
 
-    # 蘑菇（带可采集互动）
+    # 蘑菇（可采集；tags 含 "mushroom_spawn" 让 natural_events.MushroomSpawnHandler
+    # 命中并维护 mushroom_present 周期；初始即开启供玩家立刻能采）
     for _ in range(cfg["num_mushrooms"]):
         pos = random_grass_pos(lambda x, y: 0 <= x < width and 0 <= y < height
                                 and tiles[y * width + x]["terrain"] == "forest_ground")
@@ -349,28 +350,33 @@ def populate_outdoor_objects(
             "position": {"x": pos[0], "y": pos[1]},
             "size": {"width": 1, "height": 1},
             "blocks_movement": False,
-            "available_interactions": ["inspect", "take"],
-            "state": {"effect": "mushroom"},
-            "tags": ["mushroom", "edible"],
+            "available_interactions": ["inspect", "take", "pick"],
+            "state": {
+                "tile_frame_overlay": "mushroom",  # 前端 manifest.overlay_tiles → kenney 帧 29
+                "effect": "mushroom",
+                "mushroom_present": True,
+            },
+            "tags": ["mushroom", "mushroom_spawn", "edible"],
         })
 
-    # 水果（果树边）
+    # 水果（果树；tags 含 "fruit_tree" 让 FruitRipenHandler 命中；
+    # "plant" 让前端 TownScene._drawPlant 程序化绘制成绿色灌木造型）
     for _ in range(cfg["num_fruits"]):
         pos = random_grass_pos()
         if not pos:
             continue
         objects.append({
-            "object_type": "nature_spot",
-            "name": "fruit",
+            "object_type": "plant",
+            "name": "fruit_tree",
             "position": {"x": pos[0], "y": pos[1]},
             "size": {"width": 1, "height": 1},
             "blocks_movement": False,
-            "available_interactions": ["inspect", "take"],
-            "state": {"effect": "fruit"},
-            "tags": ["fruit", "edible"],
+            "available_interactions": ["inspect", "take", "pick"],
+            "state": {"effect": "fruit", "fruit_ripe": True},
+            "tags": ["fruit", "fruit_tree", "plant", "edible"],
         })
 
-    # 钓点（河流上）
+    # 钓点（河流上；tags 含 "fishing_spot" 让 FishingSpotHandler 命中并周期切换 fishing_active）
     fish_placed = 0
     for _ in range(cfg["num_fishing_spots"] * 6):
         if fish_placed >= cfg["num_fishing_spots"]:
@@ -387,10 +393,25 @@ def populate_outdoor_objects(
             "size": {"width": 1, "height": 1},
             "blocks_movement": False,
             "available_interactions": ["fish", "inspect"],
-            "state": {"effect": "fishing_spot"},
-            "tags": ["fishing", "water"],
+            "state": {"effect": "fishing_spot", "fishing_active": True},
+            "tags": ["fishing", "fishing_spot", "water"],
         })
         fish_placed += 1
+
+    # 河边长椅（在 loc_river_bench 区域内，给 BenchRestEventHandler / NPC 休憩使用；
+    # tile_frame=61 + kenney_tiny_dungeon = 椅子精灵，与室内椅子保持视觉一致）
+    for bench_x in (26, 28):
+        if 0 <= bench_x < width and 0 <= 7 < height:
+            objects.append({
+                "object_type": "furniture",
+                "name": "park_bench",
+                "position": {"x": bench_x, "y": 7},
+                "size": {"width": 1, "height": 1},
+                "blocks_movement": False,
+                "available_interactions": ["sit", "inspect"],
+                "state": {"tile_frame": 61, "tileset": "kenney_tiny_dungeon"},
+                "tags": ["bench", "rest", "outdoor"],
+            })
 
     # 河边护栏（y=3 上一行）
     for x in range(width):

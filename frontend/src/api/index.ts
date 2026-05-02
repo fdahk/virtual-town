@@ -130,6 +130,8 @@ export const api = {
       occupation_presets: Record<string, { workplace: string | null; schedule: string }>;
       schedule_templates: Record<string, Record<string, unknown>[]>;
     }>("/api/games/templates/art"),
+  getWorldDefaults: () =>
+    apiGet<{ outdoor_width: number; outdoor_height: number }>("/api/games/world-defaults"),
   postNewGame: (body: {
     seed?: number;
     outdoor_width?: number;

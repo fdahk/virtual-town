@@ -87,6 +87,11 @@ async def project_world_event_to_memory(payload: dict[str, Any]) -> None:
 
     payload 字段对齐 ``WorldEvent`` schema：``event_type / actor_entity_id /
     description / importance / payload / created_at`` 等。
+
+    阶段 21 增强：当事件由玩家发起（``source == "player"`` 或 ``actor_entity_id``
+    以 ``player_`` 开头）时，跳过给玩家自己写记忆（玩家不参与 LLM 决策），
+    改为给附近 NPC 写「目击者记忆」——让 NPC "看见" 玩家做了什么，
+    叙事链路才不会断。
     """
     from app.core.config import get_settings
 
@@ -121,6 +126,22 @@ async def project_world_event_to_memory(payload: dict[str, Any]) -> None:
         debounce_minutes = settings.memory_projection_default_debounce_minutes
         kw_prefix = event_type.split(".")[-1] if "." in event_type else event_type
 
+    # 玩家行为 → witness 投射（不给玩家自己写记忆，给附近 NPC 写）
+    source = (payload.get("source") or "").strip()
+    is_player_action = source == "player" or actor_id.startswith("player_")
+    if is_player_action:
+        try:
+            await _project_to_witnesses(
+                payload=payload,
+                event_type=event_type,
+                description=description,
+                kw_prefix=kw_prefix,
+                debounce_minutes=debounce_minutes,
+            )
+        except Exception:
+            logger.debug("project to witnesses failed", exc_info=True)
+        return
+
     # 频次抑制：(actor + event_type + target) 在窗口内只写一次
     target_id = payload.get("target_entity_id") or "_"
     debounce_key = f"mem-proj:{actor_id}:{event_type}:{target_id}"
@@ -139,6 +160,100 @@ async def project_world_event_to_memory(payload: dict[str, Any]) -> None:
         )
     except Exception:
         logger.debug("project_world_event_to_memory write failed", exc_info=True)
+
+
+_WITNESS_RADIUS = 8
+"""曼哈顿距离 ≤ 8 视为目击者。与 ``_perceive`` 中其他 Agent 的 10 格相比稍小，
+让"近距离亲历"才入记忆，避免对面街角的 NPC 也被刷记忆。"""
+
+_WITNESS_MAX = 6
+"""单次玩家行为最多投射给 6 个 NPC。22 NPC 全场景刷记忆会让 working scope
+快速膨胀，6 个目击者已足够支撑后续 LLM 决策上下文。"""
+
+
+async def _project_to_witnesses(
+    *,
+    payload: dict[str, Any],
+    event_type: str,
+    description: str,
+    kw_prefix: str,
+    debounce_minutes: int,
+) -> None:
+    """玩家行为投射：给场景内、距 actor ≤ 8 格的 NPC 各写一条目击记忆。
+
+    与 ``_write_memory`` 不同：
+    - 目击者 importance 比玩家自己经历的事件低 1 档（你听见的不如亲历），
+      最多 4，避免压住 NPC 自己的决策记忆。
+    - 描述前缀 "目击：" 让 LLM 在召回时容易判断这是间接信息。
+    - 单 actor 全局 debounce 一次（key 只包含 event_type + target），
+      避免一个玩家走来走去刷满 22×N 条记忆。
+    """
+    scene_id = payload.get("scene_id")
+    actor_x = payload.get("payload", {}).get("actor_x")
+    actor_y = payload.get("payload", {}).get("actor_y")
+    if scene_id is None or actor_x is None or actor_y is None:
+        # 没位置信息无法判定目击范围，保守跳过（player_service 写 evt 时会塞这俩字段）
+        return
+
+    # 全局 debounce：一次玩家行为整体只投一波（不再 per-NPC debounce）
+    actor_id = payload.get("actor_entity_id") or "_"
+    target_id = payload.get("target_entity_id") or "_"
+    global_key = f"mem-proj-witness:{actor_id}:{event_type}:{target_id}"
+    if not await _claim_debounce(global_key, minutes=debounce_minutes):
+        return
+
+    from app.db.models import Agent, AgentState
+    from app.db.session import get_session_factory
+    from app.services.memory_service import get_memory_service
+    from sqlalchemy import select
+
+    factory = get_session_factory()
+    async with factory() as session:
+        # 同场景内的人类 NPC（动物不参与 LLM 决策，不写）
+        rows = (
+            await session.execute(
+                select(AgentState, Agent)
+                .join(Agent, Agent.id == AgentState.agent_id)
+                .where(AgentState.scene_id == scene_id)
+                .where(Agent.entity_type == "human")
+                .where(Agent.is_active.is_(True))
+                .where(Agent.id != actor_id)  # 跳过玩家自己
+            )
+        ).all()
+
+        # 按曼哈顿距离排序取最近的 _WITNESS_MAX 个
+        with_dist: list[tuple[int, Agent]] = []
+        for state, agent in rows:
+            dist = abs(state.x - int(actor_x)) + abs(state.y - int(actor_y))
+            if dist <= _WITNESS_RADIUS:
+                with_dist.append((dist, agent))
+        with_dist.sort(key=lambda t: t[0])
+        witnesses = [a for _, a in with_dist[:_WITNESS_MAX]]
+        if not witnesses:
+            return
+
+        ms = get_memory_service()
+        # 比 actor 第一人称低 1 档，封顶 4
+        witness_importance = min(4, max(1, int(payload.get("importance") or 3) - 1))
+        scope = "short_term" if witness_importance >= _WORKING_SCOPE_THRESHOLD else "working"
+        witness_desc = f"目击：{description}"[:320]
+        kw = [kw_prefix, event_type, "witness"]
+        for npc in witnesses:
+            try:
+                await ms.write(
+                    session,
+                    agent_id=npc.id,
+                    memory_type="event",
+                    scope=scope,
+                    description=witness_desc,
+                    importance=witness_importance,
+                    importance_detail={"base": float(witness_importance), "source": "witness"},
+                    keywords=[k[:64] for k in kw][:8],
+                    commit=False,
+                )
+            except Exception:
+                logger.debug("witness memory write failed for npc=%s", npc.id, exc_info=True)
+        await session.commit()
 
 
 async def _write_memory(

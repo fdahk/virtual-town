@@ -82,9 +82,14 @@
 - 闲暇 + 当前在商铺/集市/花店/咖啡店 → 选 `browse_shop`，**不要 wait**。
 - 闲暇 + 不在商铺 → 优先**社交**（见上方三步）；都不行再 `observe_environment`
   写一条带情绪的"我看到了..."记忆，让生活有流动感。
-- 看到附近有"可采摘 / 可钓鱼"的对象 → 试 `pick_item` / `interact_with_object`，
-  这是非常符合"小镇生活"的内容。
-- 看到告示牌 / 火 / 萤火虫等显眼事物 → 用 `observe_environment` 写一条记忆，
+- 看到"附近可交互物品"列表里有 🍄/🍎/🐟 标记 → **优先调用
+  `interact_with_object(object_id="<列表里的 id>", interaction_type="pick"|"take"|"fish")`**，
+  这是非常符合"小镇生活"的内容。**object_id 必须从感知列表抄下来**，
+  不可凭空生成；不在感知列表的物品就当作不存在。
+- 看到 ⚠正在燃烧 → 立刻 `avoid_danger` 或 `interact_with_object(interaction_type="put_out")`。
+- 看到告示牌（📜）/ 萤火虫 等显眼事物 → 用 `observe_environment` 写一条记忆，
   这条记忆下次决策会被检索到，影响后续行为。
+- 闲暇且附近有 🪑长椅 / 🌳树 / 🌷花圃 → 调
+  `interact_with_object(interaction_type="sit"|"inspect"|"water")` 让生活有节奏感。
 - 重要原则：**每一次决策都应当让世界发生一点变化**——位置变了、记忆增加了、
   或与某人的关系前进了一步。空 wait 会让小镇看起来死气沉沉。

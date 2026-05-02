@@ -31,6 +31,7 @@ from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
+from app.core.config import get_settings
 from app.core.logging import get_logger
 from app.db.models import (
     Agent,
@@ -108,8 +109,8 @@ async def create_new_game(
     session: AsyncSession,
     *,
     seed: int = 42,
-    outdoor_width: int = 120,
-    outdoor_height: int = 90,
+    outdoor_width: int | None = None,
+    outdoor_height: int | None = None,
     humans: list[dict[str, Any]] | None = None,
     animals: list[dict[str, Any]] | None = None,
     player: dict[str, Any] | None = None,
@@ -119,6 +120,9 @@ async def create_new_game(
 
     若 ``humans`` / ``animals`` / ``player`` 任一为 ``None``，使用默认模板。
     """
+    settings = get_settings()
+    ow = outdoor_width if outdoor_width is not None else settings.world_gen_outdoor_default_width
+    oh = outdoor_height if outdoor_height is not None else settings.world_gen_outdoor_default_height
 
     human_templates = (
         [_coerce_template(h, "human") for h in humans]
@@ -134,8 +138,8 @@ async def create_new_game(
 
     config = GenerationConfig(
         seed=seed,
-        outdoor_width=outdoor_width,
-        outdoor_height=outdoor_height,
+        outdoor_width=ow,
+        outdoor_height=oh,
         humans=human_templates,
         animals=animal_templates,
         player=player_template,

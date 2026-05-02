@@ -259,16 +259,32 @@ async def _get_unreachable_set(agent_id: str) -> set[str]:
         return set()
 
 
+_NEARBY_OBJECT_RADIUS = 6
+"""LLM 感知半径：曼哈顿 ≤ 6 格的 WorldObject 才会出现在 perception 里。
+比其他 Agent 的 10 格更紧，避免把整张地图扔给模型；但够远到 NPC 走两步就
+能交互（场景平均人口密度下，半径 6 大约 50~80 个候选物品，按重要度截断）。"""
+
+_NEARBY_OBJECT_CAP = 8
+"""单次 perception 最多列 8 个对象。再多就让 prompt token 失控；优先级：
+有特殊状态（火 / 告示 / 成熟 / 钓鱼活跃）> 普通可交互 > 距离最近。"""
+
+
 async def _perceive(
     session: AsyncSession, agent: Agent, state: AgentState
 ) -> dict[str, Any]:
-    """只读取数据库层的场景 & 附近实体，非侵入。
+    """只读取数据库层的场景 & 附近实体 + 附近可交互物品，非侵入。
 
     同时读取 Redis 不可达黑名单，过滤掉当前 ai_tick 窗口内已知不可达的
     地点/实体，防止 LLM 反复选择必然失败的目标。
+
+    阶段 21 增强：把 ``WorldObject`` 列表（含 id / name / 可用交互动作）
+    一并拼进 perception，让 LLM 能调用 ``interact_with_object(object_id=...)``。
+    历史问题：原版只查 ``AgentState`` 与 ``Location``，模型根本拿不到
+    object_id，于是 22 NPC 几乎从不调用 ``interact_with_object`` —— 看起来
+    像"NPC 不主动与环境交互"。
     """
-    # 并发读：不可达集合与附近实体查询互相独立
-    unreachable_set, agent_state_rows = await asyncio.gather(
+    # 并发读：不可达集合 + 附近实体 + 同场景物品 三者互相独立
+    unreachable_set, agent_state_rows, world_object_rows = await asyncio.gather(
         _get_unreachable_set(agent.id),
         session.execute(
             select(AgentState).where(
@@ -276,8 +292,12 @@ async def _perceive(
                 AgentState.agent_id != agent.id,
             )
         ),
+        session.execute(
+            select(WorldObject).where(WorldObject.scene_id == state.scene_id)
+        ),
     )
     rows = agent_state_rows.scalars().all()
+    world_objects = world_object_rows.scalars().all()
 
     nearby_entities: list[tuple[str, int, int, str]] = []
     for r in rows:
@@ -318,10 +338,86 @@ async def _perceive(
     if unreachable_set:
         text_lines.append(f"- 本轮不可到达（已屏蔽）：{', '.join(sorted(unreachable_set)[:8])}")
 
-    # 自然事件感知：从引擎内存读取附近特殊状态对象
+    # 附近可交互物品（DB 直查，主进程 / worker 都能用）
+    _append_nearby_objects(state, world_objects, text_lines)
+
+    # 自然事件感知 / 天气：从引擎内存读取（如果可用）
     await _append_natural_context(session, state, text_lines)
 
     return {"text": "\n".join(text_lines), "nearby": nearby_entities}
+
+
+def _append_nearby_objects(
+    state: AgentState,
+    world_objects: list[WorldObject],
+    text_lines: list[str],
+) -> None:
+    """把附近 WorldObject 拼成 LLM 可用的 id 列表。
+
+    过滤策略：
+    - 距离 > _NEARBY_OBJECT_RADIUS 直接丢
+    - 没有 ``available_interactions`` 的（纯装饰，如 river_fence）丢
+    - 优先级：有"显著 state"（fire / 告示 / mushroom_present / fruit_ripe / fishing_active）
+      > 普通可交互 > 按距离排序
+    - 最多输出 _NEARBY_OBJECT_CAP 条
+    """
+    nearby: list[tuple[int, int, WorldObject]] = []  # (priority, dist, obj)
+    for obj in world_objects:
+        # WorldObject.position 是 JSONB dict；中间表用属性访问可能拿不到，先按 dict 处理
+        try:
+            ox = int(obj.position["x"])
+            oy = int(obj.position["y"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        dist = abs(ox - state.x) + abs(oy - state.y)
+        if dist > _NEARBY_OBJECT_RADIUS:
+            continue
+        actions = list(obj.available_interactions or [])
+        if not actions:
+            continue
+
+        # 优先级越小越靠前
+        priority = 9
+        s = obj.state or {}
+        if s.get("on_fire"):
+            priority = 0
+        elif s.get("notice_text"):
+            priority = 1
+        elif s.get("mushroom_present") or s.get("fruit_ripe"):
+            priority = 2
+        elif s.get("fishing_active"):
+            priority = 3
+        nearby.append((priority, dist, obj))
+
+    if not nearby:
+        text_lines.append("- 附近没有可交互的物品。")
+        return
+
+    nearby.sort(key=lambda t: (t[0], t[1]))
+    lines = ["- 附近可交互物品（用 interact_with_object 工具，object_id 必须从下方挑选）："]
+    for _prio, dist, obj in nearby[:_NEARBY_OBJECT_CAP]:
+        actions = ",".join((obj.available_interactions or [])[:4])
+        try:
+            ox = int(obj.position["x"])
+            oy = int(obj.position["y"])
+            pos_text = f"@({ox},{oy}) {dist}格"
+        except Exception:
+            pos_text = f"{dist}格外"
+        # 用 state 关键键给一个状态提示，方便 LLM 决策
+        s = obj.state or {}
+        hint = ""
+        if s.get("on_fire"):
+            hint = " ⚠正在燃烧"
+        elif s.get("mushroom_present"):
+            hint = " 🍄可采"
+        elif s.get("fruit_ripe"):
+            hint = " 🍎可摘"
+        elif s.get("fishing_active"):
+            hint = " 🐟有鱼"
+        elif s.get("notice_text"):
+            hint = f" 📜「{str(s.get('notice_text'))[:30]}」"
+        lines.append(f"    [{obj.id}] {obj.name} {pos_text} 可做:{actions}{hint}")
+    text_lines.extend(lines)
 
 
 async def _append_natural_context(

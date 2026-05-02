@@ -70,6 +70,9 @@ class Settings(BaseSettings):
     # 阶段 19+++ 调参：5 → 3，让 NPC 决策更频繁、社交反应更灵
     simulation_ai_tick_minutes: int = Field(default=3)
     simulation_speed_default: float = Field(default=1.0)
+    # 新游戏 / seed 默认室外地图尺寸（格）。前端向导初始值由 GET /games/world-defaults 透出。
+    world_gen_outdoor_default_width: int = Field(default=80, ge=40, le=200)
+    world_gen_outdoor_default_height: int = Field(default=60, ge=30, le=200)
     # 默认 False：用户必须从前端「开始页」手动点「新游戏」或「读档」启动仿真，
     # 避免后端起步时悄悄运行一个旧世界。需要 CI 自动启动仿真时显式置 True。
     simulation_autostart: bool = Field(default=False)

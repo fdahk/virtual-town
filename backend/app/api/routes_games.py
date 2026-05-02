@@ -18,6 +18,7 @@ from app.db.templates import (
     OCCUPATION_PRESETS,
     SCHEDULE_TEMPLATES,
 )
+from app.core.config import get_settings
 from app.services.game_service import (
     SAVE_FORMAT_VERSION,
     SaveValidationError,
@@ -29,6 +30,14 @@ from app.services.game_service import (
 router = APIRouter(prefix="/games", tags=["games"])
 
 
+def _default_req_outdoor_width() -> int:
+    return get_settings().world_gen_outdoor_default_width
+
+
+def _default_req_outdoor_height() -> int:
+    return get_settings().world_gen_outdoor_default_height
+
+
 # ---------------------------------------------------------------------------
 # 请求 / 响应模型
 # ---------------------------------------------------------------------------
@@ -36,8 +45,8 @@ router = APIRouter(prefix="/games", tags=["games"])
 
 class NewGameRequest(BaseModel):
     seed: int = 42
-    outdoor_width: int = Field(default=120, ge=40, le=200)
-    outdoor_height: int = Field(default=90, ge=30, le=200)
+    outdoor_width: int = Field(default_factory=_default_req_outdoor_width, ge=40, le=200)
+    outdoor_height: int = Field(default_factory=_default_req_outdoor_height, ge=30, le=200)
     humans: list[dict[str, Any]] | None = None  # 不传则使用默认 18 人
     animals: list[dict[str, Any]] | None = None
     player: dict[str, Any] | None = None
@@ -66,9 +75,24 @@ class ArtCatalogResponse(BaseModel):
     schedule_templates: dict[str, list[dict[str, Any]]]
 
 
+class WorldDefaultsResponse(BaseModel):
+    outdoor_width: int
+    outdoor_height: int
+
+
 # ---------------------------------------------------------------------------
 # 路由
 # ---------------------------------------------------------------------------
+
+
+@router.get("/world-defaults", response_model=WorldDefaultsResponse)
+async def get_world_defaults() -> WorldDefaultsResponse:
+    """新游戏向导用的默认室外地图尺寸（与 ``WORLD_GEN_OUTDOOR_*`` 配置一致）。"""
+    s = get_settings()
+    return WorldDefaultsResponse(
+        outdoor_width=s.world_gen_outdoor_default_width,
+        outdoor_height=s.world_gen_outdoor_default_height,
+    )
 
 
 @router.post("/new", response_model=NewGameResponse)

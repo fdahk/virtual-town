@@ -74,6 +74,7 @@ from app.schemas.agent import (
 from app.schemas.memory import MemorySearchRequest
 from app.schemas.world import TilePosition
 from app.services.agent_service import profile_from_orm
+from app.services.event_router import WORLD_EVENT_TOPIC
 from app.services.memory_service import get_memory_service
 from app.services.simulation_runtime import get_simulation_runtime
 from app.websocket.gateway import WS_BROADCAST_TOPIC
@@ -381,6 +382,45 @@ class PlayerService:
         return {"ok": True, "status": record.status}
 
     # ------------------------------------------------------------------
+    # 事件发布：让玩家产生的 WorldEvent 走与 SimulationEngine 一致的链路
+    # ------------------------------------------------------------------
+
+    async def _publish_world_event(self, evt: WorldEvent) -> None:
+        """把一条玩家产生的 WorldEvent 发到全局事件总线。
+
+        与 ``SimulationEngine._persist_tick`` 末尾的 bus.publish 链路对齐：
+        - ``Observer`` 记录到观测事件流（category=world_event）
+        - ``event_router`` → ``project_world_event_to_memory``
+          把事件投影到附近 NPC 的记忆（"目击者"逻辑）
+        - WS 客户端可订阅 world.* 主题做实时刷新
+
+        历史 BUG：原 ``_interact_object`` / ``_interact_entity`` 写完
+        ``WorldEvent`` 后只 ``session.commit()``，没有发到 ``WORLD_EVENT_TOPIC``，
+        结果玩家做的事既没有进观测台、也没有让在场 NPC 形成记忆——NPC 看
+        不见玩家行为，叙事链路断裂。这里统一补回。
+
+        必须在 ``session.commit()`` 之后调用，否则 ``evt.id`` 还没生成。
+        """
+        payload = {
+            "id": evt.id,
+            "simulation_id": evt.simulation_id,
+            "event_type": evt.event_type,
+            "source": evt.source,
+            "actor_entity_id": evt.actor_entity_id,
+            "target_entity_id": evt.target_entity_id,
+            "scene_id": evt.scene_id,
+            "location_id": evt.location_id,
+            "description": evt.description,
+            "importance": evt.importance,
+            "payload": dict(evt.payload or {}),
+            "created_at": evt.created_at.isoformat() if evt.created_at else None,
+        }
+        try:
+            await get_event_bus().publish(WORLD_EVENT_TOPIC, payload)
+        except Exception:
+            logger.debug("publish player world event failed", exc_info=True)
+
+    # ------------------------------------------------------------------
     # 交互
     # ------------------------------------------------------------------
 
@@ -451,7 +491,8 @@ class PlayerService:
             engine, eng_obj, interaction_type, player_eng, obj_state, obj_name
         )
 
-        # 写一条交互日志事件（独立于状态变化事件）
+        # 写一条交互日志事件（独立于状态变化事件）。
+        # payload 里塞 actor_x/actor_y 让 event_projector 能给附近 NPC 投目击者记忆。
         evt = WorldEvent(
             simulation_id=engine.get_simulation().id,  # type: ignore[union-attr]
             event_type="world.object_interacted",
@@ -460,16 +501,21 @@ class PlayerService:
             target_entity_id=object_id,
             scene_id=player_eng.scene_id,
             description=f"{player_eng.name} 对 {obj_name} 做了 {interaction_type}",
-            importance=2,
+            importance=3,
             payload={
                 "object_id": object_id,
+                "object_name": obj_name,
                 "interaction": interaction_type,
                 "gained_item": gained_item,
+                "actor_name": player_eng.name,
+                "actor_x": player_eng.x,
+                "actor_y": player_eng.y,
             },
             created_at=utcnow(),
         )
         session.add(evt)
         await session.commit()
+        await self._publish_world_event(evt)
         return PlayerInteractResponse(
             success=True,
             events=[evt.id],
@@ -611,7 +657,15 @@ class PlayerService:
             scene_id=player_eng.scene_id,
             description=description,
             importance=3,
-            payload={"interaction": interaction_type, "reaction": reaction, "emotion": emotion},
+            payload={
+                "interaction": interaction_type,
+                "reaction": reaction,
+                "emotion": emotion,
+                "actor_name": player_eng.name,
+                "target_name": target.name,
+                "actor_x": player_eng.x,
+                "actor_y": player_eng.y,
+            },
             created_at=utcnow(),
         )
         session.add(evt)
@@ -632,6 +686,7 @@ class PlayerService:
             commit=False,
         )
         await session.commit()
+        await self._publish_world_event(evt)
 
         # 广播
         await get_event_bus().publish(

@@ -6,7 +6,7 @@
 
 模块拆分：
 - ``types.py``：``WorldPlan`` 等数据类
-- ``outdoor.py``：120×90 室外地图布局（参数化）
+- ``outdoor.py``：参数化室外地图布局（默认尺寸见 ``WORLD_GEN_OUTDOOR_*``）
 - ``interiors.py``：16×12 室内场景与家具
 - ``placement.py``：NPC → 住宅 / 工作场所映射
 - ``relationships.py``：N×N 双向关系矩阵

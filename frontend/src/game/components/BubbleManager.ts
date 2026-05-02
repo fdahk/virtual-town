@@ -128,12 +128,13 @@ export class BubbleManager {
   tweenTo(agentId: string, x: number, y: number, duration = 260): void {
     const node = this.nodes.get(agentId);
     if (!node) return;
+    this.scene.tweens.killTweensOf(node.container);
     this.scene.tweens.add({
       targets: node.container,
       x,
       y,
       duration,
-      ease: "Sine.easeInOut",
+      ease: "Cubic.easeOut",
     });
   }
 
