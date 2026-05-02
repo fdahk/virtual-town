@@ -29,6 +29,7 @@ from app.db.models import (
     ToolCallRecord,
 )
 from app.domain.tasks.queue import (
+    FAILED,
     PENDING,
     SUCCEEDED,
     TaskQueue,
@@ -278,6 +279,93 @@ async def test_task_retry_then_succeed(session_factory, monkeypatch) -> None:
         assert got.status == SUCCEEDED
         assert got.retry_count >= 1
         assert len(handler.calls) >= 2
+    finally:
+        await observer.stop()
+        obs_mod._observer = old
+
+
+@pytest.mark.asyncio
+async def test_task_deadline_exceeded_records_error_code(session_factory, monkeypatch) -> None:
+    """阶段 21 hotfix 回归：
+
+    曾经存在两个串联 bug 导致 worker 持续刷屏：
+
+    1. ``runner._execute_task`` 里 deadline-exceeded 分支的缩进错误，使
+       ``record_task_status`` + early return 永远执行（``waited_secs``
+       未定义路径下抛 ``UnboundLocalError``，所有任务都不再调用 handler）。
+    2. ``Observer.record_task_status`` 把 ``error_code`` 写入
+       ``TaskStatusLog(**record)``，但 ORM 此前没有该列，导致整批审计
+       flush 抛 ``TypeError: 'error_code' is an invalid keyword argument``，
+       事件 / LLM / Tool 调用日志一并被丢弃。
+
+    本用例：投递一条 ``deadline`` 已经过期的任务，验证 runner 标记 failed、
+    Observer 能把 ``error_code='TASK_DEADLINE_EXCEEDED'`` 落库，且 handler
+    永不会被调用（说明 deadline 分支不会再泄漏到正常路径）。
+    """
+    import uuid
+
+    import app.db.session as db_session_mod
+    from app.domain.tasks import runner
+    from app.domain.tasks.queue import init_task_queue
+
+    handler_called = {"count": 0}
+
+    class _NeverInvokedHandler(TaskHandler):
+        task_type = "__test_deadline_never__"
+        default_timeout_seconds = 5.0
+        default_max_retries = 0
+
+        async def handle(self, ctx: TaskContext) -> TaskResult:  # pragma: no cover
+            handler_called["count"] += 1
+            return TaskResult(success=True, result={})
+
+    get_task_registry().register(_NeverInvokedHandler())
+
+    observer = Observer(flush_interval=0.1, batch_size=5)
+    observer.bind_session_factory(session_factory)
+    await observer.start()
+    import app.services.observer as obs_mod
+
+    old = obs_mod._observer
+    obs_mod._observer = observer
+    monkeypatch.setattr(db_session_mod, "get_session_factory", lambda: session_factory)
+    monkeypatch.setattr(runner, "_initialized", True)
+
+    try:
+        init_task_queue(session_factory)
+        queue = TaskQueue(session_factory)
+        monkeypatch.setattr(queue, "_push_to_rq", lambda _task, _handler: None)
+
+        task = await queue.enqueue(
+            task_type="__test_deadline_never__",
+            payload={},
+            entity_id=f"npc_test_deadline_{uuid.uuid4().hex[:6]}",
+            simulation_step=42,
+            deadline_seconds=-1.0,  # 已经过期
+        )
+        assert task.deadline_at is not None
+
+        result = await runner._execute_task(task.id)
+        assert result == {"status": FAILED, "error": "TASK_DEADLINE_EXCEEDED"}
+        assert handler_called["count"] == 0, "handler 不应在 deadline 分支被调用"
+
+        got = await queue.get_task(task.id)
+        assert got is not None
+        assert got.status == FAILED
+        assert "TASK_DEADLINE_EXCEEDED" in (got.last_error or "")
+
+        await observer._flush_now()
+        async with session_factory() as session:
+            logs = (
+                await session.execute(
+                    select(TaskStatusLog)
+                    .where(TaskStatusLog.task_id == task.id)
+                    .order_by(TaskStatusLog.id.asc())
+                )
+            ).scalars().all()
+            assert any(
+                log.error_code == "TASK_DEADLINE_EXCEEDED" for log in logs
+            ), "TaskStatusLog 应记录 error_code"
     finally:
         await observer.stop()
         obs_mod._observer = old

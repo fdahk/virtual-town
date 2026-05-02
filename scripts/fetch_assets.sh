@@ -105,29 +105,46 @@ mkdir -p "$LPC_CACHE"
 
 # 每一项格式： <local_name> <source_path>
 LPC_LAYERS=(
+  # body / head（皮肤）
   "body_male_light|body/bodies/male/light.png"
   "body_female_light|body/bodies/female/light.png"
   "body_male_taupe|body/bodies/male/taupe.png"
   "head_female_light|head/heads/human/female/light.png"
   "head_male_light|head/heads/human/male/light.png"
   "head_male_taupe|head/heads/human/male/taupe.png"
+  # hair（既有）
   "hair_long_female_black|hair/long/female/black.png"
   "hair_ponytail_female_raven|hair/ponytail/female/raven.png"
   "hair_long_female_lavender|hair/long/female/lavender.png"
   "hair_short_male_brown|hair/bedhead/male/dark_brown.png"
   "hair_short_male_black|hair/bedhead/male/black.png"
   "hair_short_male_gray|hair/bedhead/male/gray.png"
+  # hair（小镇扩张新增）
+  "hair_long_female_brown|hair/long/female/dark_brown.png"
+  "hair_short_female_brown|hair/bedhead/female/dark_brown.png"
+  "hair_short_female_black|hair/bedhead/female/black.png"
+  # torso（既有）
   "shirt_longsleeve_female_bluegray|torso/clothes/longsleeve/longsleeve/female/bluegray.png"
   "apron_female_white|torso/aprons/apron/female/white.png"
   "shirt_longsleeve_male_blue|torso/clothes/longsleeve/longsleeve/male/blue.png"
   "shirt_longsleeve_male_gray|torso/clothes/longsleeve/longsleeve/male/gray.png"
   "shirt_longsleeve_male_charcoal|torso/clothes/longsleeve/longsleeve/male/charcoal.png"
   "shirt_longsleeve_female_lavender|torso/clothes/longsleeve/longsleeve/female/lavender.png"
+  # torso（小镇扩张新增）
+  "shirt_longsleeve_male_red|torso/clothes/longsleeve/longsleeve/male/red.png"
+  "shirt_longsleeve_female_red|torso/clothes/longsleeve/longsleeve/female/red.png"
+  "shirt_longsleeve_male_brown|torso/clothes/longsleeve/longsleeve/male/brown.png"
+  "apron_male_white|torso/aprons/apron/male/white.png"
+  # legs（既有）
   "pants_male_black|legs/pants/male/black.png"
   "pants_male_brown|legs/pants/male/brown.png"
   "pants_male_charcoal|legs/pants/male/charcoal.png"
   "pants_female_black|legs/pants/female/black.png"
   "pants_female_brown|legs/pants/female/brown.png"
+  # legs（小镇扩张新增）
+  "pants_female_blue|legs/pants/female/blue.png"
+  "pants_male_blue|legs/pants/male/blue.png"
+  # feet
   "shoes_female_brown|feet/shoes/female/brown.png"
   "shoes_male_brown|feet/shoes/male/brown.png"
 )
@@ -161,6 +178,11 @@ fi
   --in "$LPC_CACHE" \
   --out "$ASSETS_DIR/sprites/humans"
 
+echo "[fetch] compose fallback portraits from sprite heads (skip if portrait already exists)"
+"$PY" "$ROOT_DIR/scripts/compose_portraits.py" \
+  --sprites "$ASSETS_DIR/sprites/humans" \
+  --out "$ASSETS_DIR/portraits/humans"
+
 echo "[fetch] natural-event effect assets (procedural SVG fallbacks – no external dependency)"
 EFFECTS_DIR="$ASSETS_DIR/effects"
 mkdir -p "$EFFECTS_DIR"
@@ -181,4 +203,5 @@ generate_placeholder_png "$EFFECTS_DIR/firefly_placeholder.png"
 generate_placeholder_png "$EFFECTS_DIR/splash_placeholder.png"
 
 echo "[fetch] done."
-echo "Next step: generate portraits with GenerateImage, then write manifest."
+echo "Hint: 旧 NPC 的高质量立绘已在仓库内；新增 NPC 会自动得到 sprite-头裁剪兜底立绘，"
+echo "      若需替换为高质量插画，可用 GenerateImage 重新生成同名 PNG 即可。"

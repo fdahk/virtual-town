@@ -28,18 +28,45 @@ interface SceneDataset {
   playerId: string | null;
 }
 
-const DISPLAY_TILE = 32;
+const DISPLAY_TILE = 20;
 const KENNEY_TILE_KEY = "kenney_tiles";
 const KENNEY_DUNGEON_KEY = "kenney_dungeon";
 
 // 兜底色（当某 terrain 既不在 Kenney 索引也不在 override 中时使用的色矩形）
 const FALLBACK_TERRAIN_COLORS: Record<string, number> = {
   grass: 0x6dae51,
+  grass_flower: 0x7fbf60,
   road: 0xb29a71,
   bridge: 0xc59357,
+  dirt: 0x9c7c4a,
   river: 0x3a8bd5,
+  water: 0x3a8bd5,
   floor: 0xd8cfbd,
   wall: 0x4a3f35,
+  cafe_ext: 0xa07050,
+  school_ext: 0xc8a45a,
+  grocery_ext: 0xa07050,
+  flower_ext: 0xc78bb5,
+  library_ext: 0xb89060,
+  bakery_ext: 0xc8a070,
+  tavern_ext: 0x8a604c,
+  post_ext: 0x9c7c5a,
+  woodshop_ext: 0x8a604c,
+  farmhouse_ext: 0xb88c6a,
+  home_ext: 0xb88c6a,
+  cafe_door: 0xc89c70,
+  school_door: 0xc89c70,
+  grocery_door: 0xc89c70,
+  flower_door: 0xc89c70,
+  library_door: 0xc89c70,
+  bakery_door: 0xc89c70,
+  tavern_door: 0xc89c70,
+  post_door: 0xc89c70,
+  woodshop_door: 0xc89c70,
+  farmhouse_door: 0xc89c70,
+  home_door: 0xc89c70,
+  farmland: 0x9c7c4a,
+  forest_ground: 0x4a6a3a,
 };
 
 interface AgentNode {
@@ -72,6 +99,9 @@ export class TownScene extends Phaser.Scene {
   private effectLayer!: Phaser.GameObjects.Container;
   /** 天气叠加层（覆盖整个视窗的半透明色彩） */
   private weatherOverlay!: Phaser.GameObjects.Rectangle;
+  /** 昼夜叠加层（深夜蓝黑，随游戏内时间淡入淡出，depth=999 在天气层之下） */
+  private dayNightOverlay!: Phaser.GameObjects.Rectangle;
+  private dayNightTween: Phaser.Tweens.Tween | null = null;
   private agentNodes = new Map<string, AgentNode>();
   /** objectId → 效果节点（火焰/萤火虫/涟漪等） */
   private effectNodes = new Map<string, EffectNode>();
@@ -189,8 +219,11 @@ export class TownScene extends Phaser.Scene {
     this.bubbleLayer.setDepth(900);
     this.bubbles = new BubbleManager(this, this.bubbleLayer);
     this.effectLayer = this.add.container(0, 0);
+    // 昼夜叠加层（depth=999，在天气层之下；深夜蓝黑色；初始完全透明）
+    this.dayNightOverlay = this.add.rectangle(0, 0, 8192, 8192, 0x06081A, 0).setOrigin(0, 0);
+    this.dayNightOverlay.setDepth(999);
     // 全屏天气叠加层（默认完全透明）
-    this.weatherOverlay = this.add.rectangle(0, 0, 4096, 4096, 0x000000, 0).setOrigin(0, 0);
+    this.weatherOverlay = this.add.rectangle(0, 0, 8192, 8192, 0x000000, 0).setOrigin(0, 0);
     this.weatherOverlay.setDepth(1000); // 始终置顶
 
     if (this.manifests) {
@@ -1092,6 +1125,57 @@ export class TownScene extends Phaser.Scene {
     node.tween?.stop();
     node.gfx.destroy();
     this.effectNodes.delete(objectId);
+  }
+
+  /**
+   * 根据游戏内 ISO 时间字符串更新昼夜叠加层。
+   * 昼夜曲线（24h）：
+   *   05:00 → 0.85（深夜）  06:30 → 0.30（黎明）  07:30 → 0.00（晴朗白天）
+   *   17:30 → 0.00         19:00 → 0.20（夕阳）   20:30 → 0.60（傍晚）
+   *   22:00 → 0.85（夜晚）  04:00 → 0.85
+   */
+  setWorldTime(worldTime: string): void {
+    // 解析 ISO 或 "HH:MM" 格式
+    let hour = 12, minute = 0;
+    try {
+      const d = new Date(worldTime);
+      if (!isNaN(d.getTime())) {
+        hour = d.getUTCHours();
+        minute = d.getUTCMinutes();
+      } else {
+        // fallback "HH:MM"
+        const parts = worldTime.split(":");
+        hour = parseInt(parts[0], 10);
+        minute = parseInt(parts[1] ?? "0", 10);
+      }
+    } catch { /* ignore */ }
+
+    const t = hour + minute / 60;
+    const targetAlpha = this._computeDayNightAlpha(t);
+
+    this.dayNightTween?.stop();
+    this.dayNightTween = this.tweens.add({
+      targets: this.dayNightOverlay,
+      alpha: targetAlpha,
+      duration: 2000,
+      ease: "Sine.easeInOut",
+    });
+  }
+
+  private _computeDayNightAlpha(t: number): number {
+    const MAX = 0.82;
+    const smoothstep = (e0: number, e1: number, x: number) => {
+      const s = Math.max(0, Math.min(1, (x - e0) / (e1 - e0)));
+      return s * s * (3 - 2 * s);
+    };
+    // 完全白天：07:30 – 17:30
+    if (t >= 7.5 && t <= 17.5) return 0;
+    // 完全夜晚：22:00 – 05:00（跨午夜用两段判断）
+    if (t >= 22 || t < 5) return MAX;
+    // 黎明：05:00 → 07:30
+    if (t >= 5 && t < 7.5) return MAX * (1 - smoothstep(5, 7.5, t));
+    // 黄昏：17:30 → 22:00
+    return MAX * smoothstep(17.5, 22, t);
   }
 
   /** 根据天气条件更新全屏叠加层颜色和透明度（保证最低可见度）。 */

@@ -116,6 +116,39 @@ export const api = {
       {},
     ),
 
+  // ---- games / 新游戏 / 模板 / 存档 ----
+  getNpcTemplates: () =>
+    apiGet<{
+      humans: Record<string, unknown>[];
+      animals: Record<string, unknown>[];
+      player: Record<string, unknown>;
+    }>("/api/games/templates/npcs"),
+  getArtCatalog: () =>
+    apiGet<{
+      lpc_layers: Record<string, { id: string; label: string; file: string }[]>;
+      animal_colors: Record<string, { id: string; label: string; file: string }[]>;
+      occupation_presets: Record<string, { workplace: string | null; schedule: string }>;
+      schedule_templates: Record<string, Record<string, unknown>[]>;
+    }>("/api/games/templates/art"),
+  postNewGame: (body: {
+    seed?: number;
+    outdoor_width?: number;
+    outdoor_height?: number;
+    humans?: Record<string, unknown>[] | null;
+    animals?: Record<string, unknown>[] | null;
+    player?: Record<string, unknown> | null;
+    auto_start?: boolean;
+  }) =>
+    apiPost<{
+      simulation_id: string | null;
+      outdoor_scene_id: string;
+      agent_count: number;
+      scene_count: number;
+      object_count: number;
+      relationship_count: number;
+    }>("/api/games/new", body),
+  getSaveSnapshot: () => apiGet<Record<string, unknown>>("/api/games/save"),
+
   // ---- simulation ----
   getCurrentSimulation: () => apiGet<Simulation>("/api/simulations/current"),
   getSimulationState: (id: string) =>

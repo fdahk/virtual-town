@@ -363,6 +363,8 @@ export function TownPage() {
       store.setScenes(scenes);
       store.setSimulation(sim);
       if (me) store.setPlayer(me);
+      // 初始化昼夜光照（场景可能还未就绪，延迟 500ms 等待 create() 完成）
+      setTimeout(() => sceneRef.current?.setWorldTime(sim.world_time), 500);
       const state = await api.getSimulationState(sim.id);
       store.setRuntimeStates(state.entities);
       const events = await api.listSimulationEvents(sim.id, 80);
@@ -432,6 +434,7 @@ export function TownPage() {
         const p = payload as SimulationDeltaPayload;
         store.patchSimulationClock(p.world_time, p.step);
         store.setRuntimeStates(p.entity_updates);
+        sceneRef.current?.setWorldTime(p.world_time);
         if (p.events.length) {
           store.pushEvents(p.events);
           for (const evt of p.events) {

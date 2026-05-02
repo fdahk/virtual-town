@@ -170,16 +170,35 @@ echo "[dev] 启动后端 API 服务器 -> http://localhost:${BACKEND_PORT_VAL}"
 BACKEND_PID=$!
 
 echo "[dev] 启动 RQ worker（消费 agent_decision / embedding / reflection 等异步任务）"
+# RQ worker 不像 uvicorn 那样自带 --reload，dev 模式下用 watchfiles 监视 app/
+# 目录的 .py 改动，自动 SIGTERM 后重启 worker，避免「改了 runner.py 但 worker
+# 仍跑旧代码」的踩坑路径（参见 docs/开发手册/SOP/本地开发热重载与进程重启SOP.md）。
+# CI / 生产不应启用此包装，故仅在 APP_ENV=dev 时启用，且要求 watchfiles 已安装
+# （uvicorn[standard] 已传递依赖，无需额外 pip）。
 (
   cd backend
   if [ -f .venv/bin/activate ]; then
     # shellcheck disable=SC1091
     source .venv/bin/activate
   fi
-  DATABASE_URL="${DATABASE_URL_LOCAL:-${DATABASE_URL}}" \
-  DATABASE_URL_SYNC="${DATABASE_URL_LOCAL_SYNC:-${DATABASE_URL_SYNC}}" \
-  REDIS_URL="${REDIS_URL_LOCAL:-${REDIS_URL}}" \
+  export DATABASE_URL="${DATABASE_URL_LOCAL:-${DATABASE_URL}}"
+  export DATABASE_URL_SYNC="${DATABASE_URL_LOCAL_SYNC:-${DATABASE_URL_SYNC}}"
+  export REDIS_URL="${REDIS_URL_LOCAL:-${REDIS_URL}}"
+  if [ "${APP_ENV:-dev}" = "dev" ] && python -c "import watchfiles" >/dev/null 2>&1; then
+    echo "[dev] worker 已启用 watchfiles 自动重载（监视 backend/app/*.py）"
+    exec watchfiles \
+      --filter python \
+      --target-type command \
+      --sigint-timeout 5 \
+      --grace-period 0 \
+      "python -m app.domain.tasks.worker" \
+      app
+  else
+    if [ "${APP_ENV:-dev}" = "dev" ]; then
+      echo "[dev] 提示：watchfiles 未安装，worker 改代码后需手动重启"
+    fi
     exec python -m app.domain.tasks.worker
+  fi
 ) &
 WORKER_PID=$!
 

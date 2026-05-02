@@ -70,7 +70,9 @@ class Settings(BaseSettings):
     # 阶段 19+++ 调参：5 → 3，让 NPC 决策更频繁、社交反应更灵
     simulation_ai_tick_minutes: int = Field(default=3)
     simulation_speed_default: float = Field(default=1.0)
-    simulation_autostart: bool = Field(default=True)
+    # 默认 False：用户必须从前端「开始页」手动点「新游戏」或「读档」启动仿真，
+    # 避免后端起步时悄悄运行一个旧世界。需要 CI 自动启动仿真时显式置 True。
+    simulation_autostart: bool = Field(default=False)
     # 异步任务队列（阶段 12 — Redis + RQ）
     # - async: 投递到 RQ 队列，由独立 worker 进程消费（默认；见 docker-compose `worker` service）
     # - sync:  保留原先 inline 的 LLM 决策路径，便于 e2e 与回归

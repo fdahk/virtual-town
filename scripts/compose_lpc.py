@@ -24,6 +24,7 @@ from PIL import Image
 # NPC → 各层文件名（和 fetch_assets.sh 中一一对应）
 # head 层是面部皮肤，必须紧跟 body 层合成，否则角色只有头发没有脸。
 NPC_LAYERS: dict[str, dict[str, str]] = {
+    # ───── 第一批 6 个 NPC（旧数据兼容） ─────
     "xiaofang": {  # 咖啡店店员，女，长黑发，围裙
         "body": "body_female_light.png",
         "head": "head_female_light.png",
@@ -40,7 +41,7 @@ NPC_LAYERS: dict[str, dict[str, str]] = {
         "legs": "pants_male_black.png",
         "feet": "shoes_male_brown.png",
     },
-    "xiaowang": {  # 程序员，男，棕短发
+    "xiaowang": {  # 程序员,男,棕短发
         "body": "body_male_light.png",
         "head": "head_male_light.png",
         "hair": "hair_short_male_brown.png",
@@ -56,7 +57,7 @@ NPC_LAYERS: dict[str, dict[str, str]] = {
         "legs": "pants_female_black.png",
         "feet": "shoes_female_brown.png",
     },
-    "chenbo": {  # 老板，男，灰发
+    "chenbo": {  # 杂货店老板，男，灰发
         "body": "body_male_taupe.png",
         "head": "head_male_taupe.png",
         "hair": "hair_short_male_gray.png",
@@ -72,6 +73,104 @@ NPC_LAYERS: dict[str, dict[str, str]] = {
         "legs": "pants_female_brown.png",
         "feet": "shoes_female_brown.png",
     },
+    # ───── 第二批 12 个新 NPC（小镇扩张） ─────
+    "lihua": {  # 校长 / 老师, 45F
+        "body": "body_female_light.png",
+        "head": "head_female_light.png",
+        "hair": "hair_long_female_brown.png",
+        "torso": "shirt_longsleeve_female_red.png",
+        "legs": "pants_female_black.png",
+        "feet": "shoes_female_brown.png",
+    },
+    "zhangdage": {  # 面包师 / 张大哥, 38M
+        "body": "body_male_light.png",
+        "head": "head_male_light.png",
+        "hair": "hair_short_male_black.png",
+        "torso": "apron_male_white.png",
+        "legs": "pants_male_brown.png",
+        "feet": "shoes_male_brown.png",
+    },
+    "xiaoyu": {  # 图书管理员 / 小雨, 22F
+        "body": "body_female_light.png",
+        "head": "head_female_light.png",
+        "hair": "hair_short_female_black.png",
+        "torso": "shirt_longsleeve_female_lavender.png",
+        "legs": "pants_female_blue.png",
+        "feet": "shoes_female_brown.png",
+    },
+    "laomu": {  # 退休木匠 / 老穆, 62M
+        "body": "body_male_taupe.png",
+        "head": "head_male_taupe.png",
+        "hair": "hair_short_male_gray.png",
+        "torso": "shirt_longsleeve_male_brown.png",
+        "legs": "pants_male_brown.png",
+        "feet": "shoes_male_brown.png",
+    },
+    "xiaodi": {  # 学徒木匠 / 小迪, 19M
+        "body": "body_male_light.png",
+        "head": "head_male_light.png",
+        "hair": "hair_short_male_brown.png",
+        "torso": "shirt_longsleeve_male_blue.png",
+        "legs": "pants_male_charcoal.png",
+        "feet": "shoes_male_brown.png",
+    },
+    "axin": {  # 酒馆老板娘 / 阿欣, 30F
+        "body": "body_female_light.png",
+        "head": "head_female_light.png",
+        "hair": "hair_long_female_brown.png",
+        "torso": "shirt_longsleeve_female_red.png",
+        "legs": "pants_female_brown.png",
+        "feet": "shoes_female_brown.png",
+    },
+    "axu": {  # 厨师 / 阿旭, 27M
+        "body": "body_male_light.png",
+        "head": "head_male_light.png",
+        "hair": "hair_short_male_black.png",
+        "torso": "apron_male_white.png",
+        "legs": "pants_male_charcoal.png",
+        "feet": "shoes_male_brown.png",
+    },
+    "meimei": {  # 小学生 / 美美, 7F
+        "body": "body_female_light.png",
+        "head": "head_female_light.png",
+        "hair": "hair_short_female_brown.png",
+        "torso": "shirt_longsleeve_female_lavender.png",
+        "legs": "pants_female_blue.png",
+        "feet": "shoes_female_brown.png",
+    },
+    "lifang": {  # 农场主 / 李芳, 50F
+        "body": "body_female_light.png",
+        "head": "head_female_light.png",
+        "hair": "hair_long_female_brown.png",
+        "torso": "shirt_longsleeve_female_bluegray.png",
+        "legs": "pants_female_brown.png",
+        "feet": "shoes_female_brown.png",
+    },
+    "axiang": {  # 农场工人 / 阿祥, 24M
+        "body": "body_male_taupe.png",
+        "head": "head_male_taupe.png",
+        "hair": "hair_short_male_brown.png",
+        "torso": "shirt_longsleeve_male_brown.png",
+        "legs": "pants_male_brown.png",
+        "feet": "shoes_male_brown.png",
+    },
+    "yueling": {  # 邮差 / 月玲, 32F
+        "body": "body_female_light.png",
+        "head": "head_female_light.png",
+        "hair": "hair_short_female_brown.png",
+        "torso": "shirt_longsleeve_female_bluegray.png",
+        "legs": "pants_female_blue.png",
+        "feet": "shoes_female_brown.png",
+    },
+    "xiaoke": {  # 中学生 / 小柯, 14M
+        "body": "body_male_light.png",
+        "head": "head_male_light.png",
+        "hair": "hair_short_male_brown.png",
+        "torso": "shirt_longsleeve_male_red.png",
+        "legs": "pants_male_blue.png",
+        "feet": "shoes_male_brown.png",
+    },
+    # ───── 玩家 ─────
     "player_default": {  # 玩家默认
         "body": "body_male_light.png",
         "head": "head_male_light.png",
