@@ -165,7 +165,6 @@ async def test_task_lifecycle_run(session_factory, monkeypatch) -> None:
     新架构下 worker 是独立进程（``python -m app.domain.tasks.worker``），
     测试里不拉 RQ worker，而是直接调用 runner 的 ``_execute_task`` 模拟消费。
     """
-    from app.db.session import _session_factory_singleton, get_session_factory  # noqa: F401
     import app.db.session as db_session_mod
     from app.domain.tasks import runner
     from app.domain.tasks.queue import init_task_queue

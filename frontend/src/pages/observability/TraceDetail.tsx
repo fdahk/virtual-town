@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { obsApi } from "../../api";
-import type { LLMCallRecord, ObservabilityEvent, TaskRecord, ToolCallRecord, TraceBundle } from "../../types/observability";
+import type { LLMCallRecord, TaskRecord, ToolCallRecord, TraceBundle } from "../../types/observability";
 import { CopyableTruncatedId } from "./CopyableTruncatedId";
 
 

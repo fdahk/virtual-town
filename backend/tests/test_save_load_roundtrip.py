@@ -120,15 +120,15 @@ def mock_runtime(monkeypatch):
 
 
 async def _seed_minimal_world(session: AsyncSession, *, seed: int = 7) -> None:
-    """生成一个最小可用的世界（小地图，仅用前 3 个默认模板）。
+    """生成一个最小可用的世界（室外图符合布局下界，仅用更少模板）。
 
     GenerationConfig 默认 22 NPC + 大地图，对单元测试太重；这里用更小的 seed
-    + 截断模板列表加速。
+    + 截断模板列表加速。室外尺寸需 ≥120×90，否则会触发世界布局校验失败。
     """
     config = GenerationConfig(
         seed=seed,
-        outdoor_width=40,
-        outdoor_height=30,
+        outdoor_width=120,
+        outdoor_height=90,
         humans=list(DEFAULT_HUMAN_TEMPLATES[:2]),
         animals=list(DEFAULT_ANIMAL_TEMPLATES[:1]),
         player=DEFAULT_PLAYER_TEMPLATE,

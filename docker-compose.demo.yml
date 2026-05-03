@@ -83,8 +83,8 @@ services:
       DATABASE_URL_LOCAL: ""
       DATABASE_URL_LOCAL_SYNC: ""
       REDIS_URL_LOCAL: ""
-      # Demo 前端由 nginx 在 FRONTEND_DEMO_PORT 提供，CORS 白名单需匹配
-      BACKEND_CORS_ORIGINS: "http://localhost:${FRONTEND_DEMO_PORT:-8080}"
+      # 与 .env 中 BACKEND_CORS_ORIGINS 一致（部署时为公网 http://host:8080）；默认本地 demo
+      BACKEND_CORS_ORIGINS: ${BACKEND_CORS_ORIGINS:-http://localhost:8080}
     ports:
       - "${BACKEND_PORT:-8000}:8000"
     depends_on:

@@ -68,6 +68,8 @@ export function ChatPanel() {
         setDecline({ kind: "hard", line: null, reason: e.message ?? null });
       })
       .finally(() => setBusy(false));
+    // 仅在新目标上重置请求；依赖完整 pending 会因 zustand 引用变化产生多余重试
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- 与 handleClose 不同，此处只关心 targetId
   }, [pending?.targetId]);
 
   // Esc 键关闭对话

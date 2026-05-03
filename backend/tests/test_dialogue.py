@@ -22,6 +22,17 @@ from app.domain.dialogue.reply import (
 from app.schemas.agent import AgentAppearance, AgentProfile
 
 
+@pytest.fixture
+def force_rule_intent(monkeypatch: pytest.MonkeyPatch) -> None:
+    """本机若配置 LLM_API_KEY，classify_intent 会走模型分支；规则用例强制走关键词兜底。"""
+    import app.domain.dialogue.intent as intent_mod
+
+    class Dummy:
+        settings = type("settings", (), {"llm_is_configured": False})()
+
+    monkeypatch.setattr(intent_mod, "get_llm_client", lambda: Dummy())
+
+
 def _profile(name: str = "小芳", personality=None) -> AgentProfile:
     return AgentProfile(
         id="npc_test",
@@ -70,20 +81,20 @@ def test_rule_rewrite_no_pronoun_no_memory() -> None:
 
 
 @pytest.mark.asyncio
-async def test_rule_intent_location() -> None:
+async def test_rule_intent_location(force_rule_intent) -> None:
     # 无 LLM：走规则
     out = await classify_intent(raw_text="图书馆在哪里？")
     assert out.intent == "ask_location"
 
 
 @pytest.mark.asyncio
-async def test_rule_intent_pet_animal() -> None:
+async def test_rule_intent_pet_animal(force_rule_intent) -> None:
     out = await classify_intent(raw_text="过来，让我摸摸你", target_entity_type="animal")
     assert out.intent == "pet_animal"
 
 
 @pytest.mark.asyncio
-async def test_rule_intent_threaten() -> None:
+async def test_rule_intent_threaten(force_rule_intent) -> None:
     out = await classify_intent(raw_text="你小心点，别惹我")
     assert out.intent == "threaten"
     assert out.urgency == "high"

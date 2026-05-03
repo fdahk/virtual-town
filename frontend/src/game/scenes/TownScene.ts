@@ -1,12 +1,7 @@
 import Phaser from "phaser";
 import { AGENT_MOVE_TWEEN_EASE, getAgentMoveTweenMs } from "../agentMotion";
 import { eventBus, type NaturalEffectPayload } from "../eventBus";
-import {
-  loadManifests,
-  resolveAnimalColor,
-  resolveHumanSprite,
-  type LoadedManifests,
-} from "../assets/manifest";
+import { resolveAnimalColor, type LoadedManifests } from "../assets/manifest";
 import { BubbleManager, mapStateToBubble } from "../components/BubbleManager";
 import type {
   AgentProfile,
@@ -372,8 +367,7 @@ export class TownScene extends Phaser.Scene {
     for (const kind of ["cats", "dogs"] as const) {
       const manifest = m.sprites[kind];
       const sheetKey = kind === "cats" ? "animals_cats" : "animals_dogs";
-      const rowsPerDir = 2; // 每方向 2 行 × 2 帧 = 4 帧 walk
-      const cols = 16; // 4 颜色 × 4 列
+      const cols = 16; // 4 颜色 × 4 列；每方向行号由 manifest.direction_rows 提供
       for (const [colorName, off] of Object.entries(manifest.colors)) {
         for (const [dir, row] of Object.entries(manifest.direction_rows)) {
           const key = `${sheetKey}_${colorName}_walk_${dir}`;

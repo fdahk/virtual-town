@@ -20,7 +20,7 @@ export function EventLog() {
                   {labelEvent(e.event_type)}
                 </span>
                 <div style={styles.desc}>
-                  {actorName ? <b>{actorName}　</b> : null}
+                  {actorName ? <b>{actorName} </b> : null}
                   {e.description}
                 </div>
               </div>
