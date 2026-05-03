@@ -63,6 +63,7 @@ const WEATHER_CONDITION_LABELS: Record<string, string> = {
 };
 
 function weatherStatusFromEvents(events: WorldEvent[]): string {
+  // API 按 created_at 降序：第一条匹配即为最近一条天气
   const evt = events.find((e) => e.event_type === "weather.condition_changed");
   if (!evt) return "天气：—";
   const p = evt.payload;
@@ -364,12 +365,20 @@ export function TownPage() {
       store.setScenes(scenes);
       store.setSimulation(sim);
       if (me) store.setPlayer(me);
-      // 初始化昼夜光照（场景可能还未就绪，延迟 500ms 等待 create() 完成）
-      setTimeout(() => sceneRef.current?.setWorldTime(sim.world_time), 500);
       const state = await api.getSimulationState(sim.id);
       store.setRuntimeStates(state.entities);
       const events = await api.listSimulationEvents(sim.id, 80);
       store.setEvents(events);
+      // Phaser 昼夜/天气层依赖 sceneRef + eventBus；等 create() 后再同步，并把 REST 里
+      // 最近一条天气事件补推到 eventBus（否则仅靠 WS delta 时首屏天气叠加层会一直透明）。
+      setTimeout(() => {
+        sceneRef.current?.setWorldTime(sim.world_time);
+        const latestWx = events.find((e) => e.event_type === "weather.condition_changed");
+        const payload = latestWx?.payload as NaturalEffectPayload | undefined;
+        if (payload && typeof payload === "object") {
+          eventBus.emit({ type: "weather.condition_changed", payload });
+        }
+      }, 550);
       // 断线重连后自动拉取最新快照替换 runtime（§14.5）
       simulationSocket.setReconnectHook(async () => {
         try {

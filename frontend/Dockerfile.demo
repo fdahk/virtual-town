@@ -1,0 +1,29 @@
+# ============================================================
+# 多阶段构建：Stage 1 编译静态资源，Stage 2 用 nginx 提供服务
+# 用于 docker-compose.demo.yml（用户体验模式，无代码热重载）
+# ============================================================
+
+# ---- Stage 1: Build ----------------------------------------
+FROM node:20-alpine AS builder
+
+WORKDIR /app
+
+COPY package.json package-lock.json* ./
+RUN npm install --no-audit --no-fund
+
+COPY . /app
+
+# VITE_API_BASE_URL / VITE_WS_BASE_URL 留空 → 前端用相对路径
+# nginx 负责将 /api/ 和 /ws/ 代理到 backend 容器
+# VITE_AGENT_MOVE_TWEEN_MS 未设时代码默认回退 145ms
+RUN npm run build
+
+# ---- Stage 2: Serve ----------------------------------------
+FROM nginx:alpine
+
+COPY --from=builder /app/dist /usr/share/nginx/html
+COPY nginx.demo.conf /etc/nginx/conf.d/default.conf
+
+EXPOSE 80
+
+CMD ["nginx", "-g", "daemon off;"]

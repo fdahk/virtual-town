@@ -1,0 +1,141 @@
+# ============================================================
+# AI 小镇 - Demo 模式（全 Docker，用户体验向）
+# 用法：scripts/start.sh
+# ============================================================
+# 与 docker-compose.yml（开发模式）的区别：
+#   - 代码已在构建时打包进镜像，无宿主机目录挂载
+#   - 后端无 --reload，worker 无 watchfiles 包装
+#   - 前端通过多阶段构建生成静态文件，由 nginx 提供服务
+#   - migrate 作为 init 容器在 backend/worker 启动前完成迁移与种子数据
+#   - DATABASE_URL_LOCAL* / REDIS_URL_LOCAL 显式清空，防止 seed.py 拿到宿主机直连地址
+
+services:
+  # ----------------------------------------------------------
+  # 数据库
+  # ----------------------------------------------------------
+  postgres:
+    image: pgvector/pgvector:pg16
+    container_name: vt_postgres
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-virtual_town}
+      POSTGRES_USER: ${POSTGRES_USER:-virtual_town}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-virtual_town_dev}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-virtual_town}"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    restart: unless-stopped
+
+  redis:
+    image: redis:7-alpine
+    container_name: vt_redis
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    restart: unless-stopped
+
+  # ----------------------------------------------------------
+  # Init 容器：迁移 + 种子数据（执行完自动退出）
+  # ----------------------------------------------------------
+  migrate:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: vt_migrate
+    env_file:
+      - .env
+    environment:
+      POSTGRES_HOST: postgres
+      REDIS_HOST: redis
+      # 容器内必须走 Docker 内部 hostname，显式清空宿主机直连地址，
+      # 防止 seed.py 的 DATABASE_URL_LOCAL_SYNC 优先逻辑拿到错误地址
+      DATABASE_URL_LOCAL: ""
+      DATABASE_URL_LOCAL_SYNC: ""
+      REDIS_URL_LOCAL: ""
+    # 先跑 alembic 升级，再写入演示世界（--if-empty：已有数据则跳过）
+    command: >
+      sh -c "alembic upgrade head && python -m app.db.seed --if-empty"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
+
+  # ----------------------------------------------------------
+  # 后端 API
+  # ----------------------------------------------------------
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: vt_backend
+    env_file:
+      - .env
+    environment:
+      POSTGRES_HOST: postgres
+      REDIS_HOST: redis
+      DATABASE_URL_LOCAL: ""
+      DATABASE_URL_LOCAL_SYNC: ""
+      REDIS_URL_LOCAL: ""
+      # Demo 前端由 nginx 在 FRONTEND_DEMO_PORT 提供，CORS 白名单需匹配
+      BACKEND_CORS_ORIGINS: "http://localhost:${FRONTEND_DEMO_PORT:-8080}"
+    ports:
+      - "${BACKEND_PORT:-8000}:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    restart: unless-stopped
+
+  # ----------------------------------------------------------
+  # RQ Worker（异步任务：LLM 决策 / embedding / 反思）
+  # ----------------------------------------------------------
+  worker:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: vt_worker
+    env_file:
+      - .env
+    environment:
+      POSTGRES_HOST: postgres
+      REDIS_HOST: redis
+      DATABASE_URL_LOCAL: ""
+      DATABASE_URL_LOCAL_SYNC: ""
+      REDIS_URL_LOCAL: ""
+    command: python -m app.domain.tasks.worker
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    restart: unless-stopped
+
+  # ----------------------------------------------------------
+  # 前端（nginx 静态 + 反代 /api /ws）
+  # ----------------------------------------------------------
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile.demo
+    container_name: vt_frontend
+    ports:
+      - "${FRONTEND_DEMO_PORT:-8080}:80"
+    depends_on:
+      - backend
+    restart: unless-stopped
+
+volumes:
+  postgres_data:
+  redis_data:

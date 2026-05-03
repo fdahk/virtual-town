@@ -74,39 +74,103 @@ virtual-town/
 │   └── package.json
 ├── docs/                       # 产品需求与实施方案（权威）
 ├── scripts/                    # 一键启动、种子、重置、数据库备份
-├── docker-compose.yml
+├── docker-compose.yml          # 开发向：全栈容器 + 代码目录挂载 + 热重载
+├── docker-compose.demo.yml     # 体验向：镜像内构建、nginx 静态前端（scripts/start.sh）
 ├── .env.example
 └── README.md
 ```
 
 ---
 
-## 一键启动
+## 本地运行（三种方式）
+
+共性准备：在仓库根目录执行 `cp .env.example .env`，按需编辑（`LLM_API_KEY` 可选；不配则 NPC 走规则行为，仿真仍可跑）。
+
+### 方式一：推荐开发 — `scripts/dev.sh`（混合）
+
+**适合**：日常改代码、断点调试、最快热重载。
+
+| 组件 | 运行位置 |
+|------|----------|
+| PostgreSQL、Redis | Docker（`docker compose` 只起 `postgres`、`redis`） |
+| 后端 API（uvicorn `--reload`） | 宿主机 `backend/.venv` |
+| RQ Worker（可选 `watchfiles` 自动重启） | 宿主机 |
+| 前端（Vite） | 宿主机 |
+
+**依赖**：本机需安装 **Docker Desktop**、**Python 3.11+**、**Node 20+**；后端首次需在 `backend/` 执行 `python -m venv .venv && source .venv/bin/activate && pip install -e .[dev]`（或交给脚本在已有 `.venv` 时使用）。
 
 ```bash
-cp .env.example .env
-# 编辑 .env，可选填入 LLM_API_KEY。未配置时 NPC 走规则行为，仿真照常可运行。
-
 ./scripts/dev.sh
 ```
 
-启动完成后：
+**访问地址**（默认端口，可在 `.env` 调整 `BACKEND_PORT` / `VITE_DEV_PORT`）：
 
-- 前端：<http://localhost:5173>
-- 后端：<http://localhost:8000>
-- OpenAPI：<http://localhost:8000/docs>
+| 用途 | URL |
+|------|-----|
+| 游戏前端 | <http://localhost:5173> |
+| 研发观测台 | <http://localhost:5173/observability> |
+| 后端 API | <http://localhost:8000> |
+| OpenAPI | <http://localhost:8000/docs> |
 
-若无需本地 Python/Node 环境，也可完全走容器：
+停止：在运行 `dev.sh` 的终端 **Ctrl+C**（脚本会清理子进程）。数据库卷仍保留；下次 `./scripts/dev.sh` 可继续使用。
+
+> `.env` 里需能通过 **localhost** 连上容器映射端口：`DATABASE_URL_LOCAL` / `DATABASE_URL_LOCAL_SYNC`、`REDIS_URL_LOCAL`（示例见 `.env.example`）。若本机 Postgres 占用了 `5432`，可把 `POSTGRES_PORT` 改为例如 `5433` 并同步改上述 `*_LOCAL` URL。
+
+---
+
+### 方式二：仅 Docker 体验 — `scripts/start.sh`（演示栈）
+
+**适合**：给用户或演示环境：**只要装了 Docker**，不要求安装 Python / Node。
+
+使用 **`docker-compose.demo.yml`**：镜像内安装依赖、前端 **nginx 托管构建产物**（非 Vite dev server），无源码目录挂载。
+
+```bash
+bash scripts/start.sh
+# 或
+./scripts/start.sh
+```
+
+脚本会检查 Docker、准备 `.env`、交互询问（或保留）`LLM_API_KEY`，再 `docker compose -f docker-compose.demo.yml up`。**若本机已有 `virtual-town-backend` / `virtual-town-frontend` 镜像，默认会跳过 `--build` 以加速二次启动**；改动了 `Dockerfile*`、`nginx.demo.conf` 等必须打镜像的内容后，请强制执行：
+
+```bash
+./scripts/start.sh --rebuild
+```
+
+其它参数：`./scripts/start.sh --no-open` 启动成功但不自动打开浏览器。
+
+**访问地址**（默认 `FRONTEND_DEMO_PORT=8080`，见 `.env`）：
+
+| 用途 | URL |
+|------|-----|
+| 游戏前端（nginx） | <http://localhost:8080> |
+| 研发观测台 | <http://localhost:8080/observability> |
+| OpenAPI | <http://localhost:8000/docs> |
+
+停止：`docker compose -f docker-compose.demo.yml down`（数据卷默认保留；需清库可加 `-v`）。
+
+> 大体积 **读档** 依赖 nginx `client_max_body_size`；若升级后仍 413，请确认已 **`--rebuild` 前端镜像**。
+
+---
+
+### 方式三：全容器开发 — `docker compose`（`docker-compose.yml`）
+
+**适合**：希望与 CI/生产接近、或不想在本机装 Python/Node，但仍要 **卷挂载源码 + 热重载**。
 
 ```bash
 docker compose up --build
 ```
 
+后端 / worker / 前端容器内均为开发命令（如 `uvicorn --reload`、`npm run dev`），与 **方式一** 的访问端口习惯一致：前端 **5173**、后端 **8000**（见该 compose 内端口映射）。
+
+---
+
 ### 其它脚本
 
 | 脚本 | 作用 |
 |------|------|
-| `./scripts/dev.sh` | 一键启动完整开发环境（含任务 worker / 观测 flush） |
+| `./scripts/dev.sh` | 混合开发一键启动（postgres/redis 容器 + 本机 API / worker / Vite） |
+| `./scripts/start.sh` | 全 Docker 演示一键启动（`docker-compose.demo.yml`） |
+| `./scripts/start.sh --rebuild` | 强制重新构建镜像后再启动 |
 | `./scripts/seed.sh` | 初始化演示世界 |
 | `./scripts/seed.sh --if-empty` | 数据库为空时才初始化 |
 | `./scripts/reset_db.sh` | 销毁并重建数据库 |
@@ -151,6 +215,8 @@ npm run gen:types
 
 ## 演示脚本
 
+（若用 **`start.sh` / demo 栈**，请打开 <http://localhost:8080> 替代下面步骤里的 5173。）
+
 1. 打开 <http://localhost:5173> → 创建角色。
 2. 进入小镇：小镇时间、NPC 列表、事件日志可见。
 3. 走到咖啡店门口进入室内。
@@ -177,11 +243,12 @@ npm run gen:types
 
 独立于玩家页面，用于**还原系统每一步运行过程**（一次决策、一次玩家对话、一次工具调用、一次记忆写入）。
 
-访问地址：
+访问地址（与启动方式一致）：
 
-- 前端：<http://localhost:5173/observability>
-- REST：`GET /api/observability/*`
-- WS：`ws://localhost:8000/ws/observability/{simulation_id}`
+- **dev.sh / `docker-compose.yml` 全容器**：前端路由 <http://localhost:5173/observability>
+- **`start.sh`（demo）**：前端路由 <http://localhost:8080/observability>（若改了 `FRONTEND_DEMO_PORT` 则替换端口）
+- REST：`GET /api/observability/*`（经 demo 的 nginx 时为同源 `/api/...`）
+- WS：`ws://localhost:8000/ws/observability/{simulation_id}`（浏览器若经 8080 同源访问，则由前端推断为 `ws://localhost:8080`，nginx 会转发到后端）
 
 可观察的维度：
 

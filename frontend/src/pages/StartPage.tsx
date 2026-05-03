@@ -140,7 +140,7 @@ export function StartPage({ onEnterTown }: Props) {
       </div>
 
       <div style={styles.footer}>
-        <a href="/observability" style={styles.footerLink}>
+        <a href="/observability" style={styles.footerLink} target="_blank">
           研发观测台 →
         </a>
       </div>
