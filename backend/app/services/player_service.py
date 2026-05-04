@@ -1137,7 +1137,7 @@ class PlayerService:
                         },
                         entity_id=target.id,
                         idempotency_extra=f"summary:{int(utcnow().timestamp()) // 60}",
-                        deadline_seconds=90.0,
+                        deadline_seconds=float(get_settings().agent_decision_deadline_seconds),
                     )
         except Exception:
             logger.debug("enqueue relationship_update failed", exc_info=True)

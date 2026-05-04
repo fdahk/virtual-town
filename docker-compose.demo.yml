@@ -113,6 +113,10 @@ services:
       DATABASE_URL_LOCAL_SYNC: ""
       REDIS_URL_LOCAL: ""
     command: python -m app.domain.tasks.worker
+    # 吞吐：LLM/RQ 瓶颈时可水平扩容 worker（注意 Postgres max_connections ≈ 每副本连接池之和）
+    #   docker compose -f docker-compose.demo.yml up -d --scale worker=2 --no-recreate
+    # 或与 compose profile 并行跑第二条 worker；扩容后若连接打满，请下调 .env 里
+    # TASK_QUEUE_WORKER_CONCURRENCY 或调高 PG max_connections。
     depends_on:
       postgres:
         condition: service_healthy

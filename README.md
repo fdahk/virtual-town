@@ -291,11 +291,22 @@ TASK_QUEUE_HIGH=vt:high
 TASK_QUEUE_DEFAULT=vt:default
 TASK_QUEUE_LOW=vt:low
 TASK_QUEUE_WORKER_COUNT=1
-OBSERVABILITY_FLUSH_INTERVAL=1.5
-OBSERVABILITY_BATCH_SIZE=200
+TASK_QUEUE_WORKER_CONCURRENCY=18       # 默认 18；须 ≤ db/session.py 连接池 ÷ ~2
+OBSERVABILITY_FLUSH_INTERVAL=2
+OBSERVABILITY_BATCH_SIZE=280
+OBSERVABILITY_BUFFER_MAX_SIZE=4000
 ```
 
----
+**近期默认调优（吞吐）**：适度提高 worker 并发与观测批量、`Observer` 落库改用 `session.add_all`；连接池调至 **22+22**/进程以匹配并发。**横向扩 worker** 时务必核对 Postgres `max_connections`。
+
+**冷启动**（本仓库文档语境）：**backend 进程或 `vt_backend` 容器从停到再起**的这一次启动——会重新跑 `lifespan`、重新 `_load_state`、可选清 RQ / 收敛 `simulation.status`（见 `SIMULATION_AUTOSTART`、`SIMULATION_RESET_QUEUE_ON_START`）。**不是**「玩家第一次打开页面」；玩家侧只要不断开游戏 WebSocket，一般不会单独触发这一套。
+
+**关页 / 断线会不会自动暂停？** 会——在默认配置下：`SIMULATION_AUTO_PAUSE_WHEN_NO_GAME_WS_CLIENTS=true` 时，**游戏场景** WebSocket（`/ws/simulations/{id}`）在**该 `simulation_id` 下最后一个连接**断开后，等待 `SIMULATION_AUTO_PAUSE_AFTER_IDLE_SECONDS`（默认 45s）仍无人重连，则 `POST` 等价暂停。**观测台** `/ws/observability` 不计入在线人数，避免「只看 Dashboard 仍被当作无人」误暂停。
+
+**多玩家与「谁的世界」？** 当前是 **单世界 MVP**：数据库里通常只有 **一行** `simulation`（`engine._load_state` 用 `limit(1)`），全进程 **一个** `SimulationEngine`。REST `/players/me` **不做登录鉴权**，谁连到同一后端，看到的是**同一条** `GET /simulations/current`、同一个世界快照；多开浏览器等于**共享**这一个世界与同一个「玩家」角色，**没有**按用户 ID 隔离多实例世界。**不能**在同一套进程模型里同时跑多个相互独立、各有一套 22 NPC 的「租户世界」——要支持需要多引擎 / 多租户路由 / 鉴权，属于架构升级，不在当前 MVP 范围。
+
+**观测台里事件 / 任务很多 = 性能不够？** 不一定。**任务队列 pending 大**多半说明 **LLM 慢 + worker 吞吐 < NPC 入队速率**（或历史积压未清），世界 tick 仍可能在跑，_NPC 决策_会滞后。**世界事件**条数随 `current_step` 增长是正常现象；若关心 **背压**，优先：**加 worker 副本**（`docker compose up --scale worker=N`）、酌情调 `TASK_QUEUE_WORKER_CONCURRENCY`（须 ≤ DB 连接池余量，见 `config.py` 注释）、略降 `SIMULATION_WORLD_TICK_HZ` 或略增 `SIMULATION_AI_TICK_MINUTES` 减轻入队压力、关 LLM 或压测时减小 NPC 数。若仍不足再考虑代码层批处理 / 优先级策略，而不是先改「整体架构」。
+
 
 ## E2E 验收
 

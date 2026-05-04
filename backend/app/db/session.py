@@ -27,17 +27,16 @@ def get_engine() -> AsyncEngine:
     global _engine, _session_factory
     if _engine is None:
         settings = get_settings()
-        # 阶段 21+：把 pool_size 从 5 提升到 20，max_overflow 10 → 20。
-        # 自定义并发 worker 默认 8 个槽位 × (1 主 session + 1-2 内部 session)
-        # ≈ 16-24 个并发 DB 连接；同时还要给 API 进程留出空间。
-        # 上限受 PostgreSQL ``max_connections`` 约束（pgvector/pg16 默认 100）；
-        # backend + worker 共 40-50 个连接是安全余量。
+        # 阶段 21+：pool 与 ``task_queue_worker_concurrency``（默认 18）对齐：
+        # 单任务峰值约 2 条并发 session → 36，余量给 ttl / mini-scheduler / API。
+        # 多 worker 副本时每进程各有一份池 —— 扩 ``--scale worker=N`` 时请核对
+        # Postgres ``max_connections``（默认 100），必要时下调 concurrency 或池上限。
         _engine = create_async_engine(
             settings.database_url,
             echo=False,
             pool_pre_ping=True,
-            pool_size=20,
-            max_overflow=20,
+            pool_size=22,
+            max_overflow=22,
         )
         _session_factory = async_sessionmaker(
             _engine, expire_on_commit=False, class_=AsyncSession

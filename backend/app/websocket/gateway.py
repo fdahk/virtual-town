@@ -15,6 +15,7 @@ from typing import Any
 import orjson
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
+from app.core.config import get_settings
 from app.core.event_bus import get_event_bus
 from app.core.logging import get_logger
 from app.core.time import iso, utcnow
@@ -24,6 +25,57 @@ logger = get_logger(__name__)
 websocket_router = APIRouter()
 
 WS_BROADCAST_TOPIC = "ws.broadcast"
+
+# 按 simulation_id 防抖：最后一名游戏客户端断线 → 等待 idle 秒后仍无人则自动 pause
+_pending_auto_pause: dict[str, asyncio.Task] = {}
+
+
+def _cancel_scheduled_auto_pause(simulation_id: str) -> None:
+    t = _pending_auto_pause.pop(simulation_id, None)
+    if t is not None and not t.done():
+        t.cancel()
+
+
+def _schedule_auto_pause_if_config(simulation_id: str) -> None:
+    settings = get_settings()
+    if not settings.simulation_auto_pause_when_no_game_ws_clients:
+        return
+    idle = settings.simulation_auto_pause_after_idle_seconds
+    _cancel_scheduled_auto_pause(simulation_id)
+
+    async def _run() -> None:
+        try:
+            if idle > 0:
+                await asyncio.sleep(idle)
+            mgr = get_connection_manager()
+            if mgr.total(simulation_id) > 0:
+                return
+            from app.services.simulation_runtime import get_simulation_runtime
+
+            rt = get_simulation_runtime()
+            try:
+                eng = rt.engine
+            except RuntimeError:
+                return
+            sim = eng.get_simulation()
+            if sim is None or sim.id != simulation_id or sim.status != "running":
+                return
+            await rt.pause_simulation(simulation_id)
+            logger.info(
+                "simulation auto-paused (no game WebSocket clients after idle)",
+                extra={"simulation_id": simulation_id, "idle_seconds": idle},
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception(
+                "simulation auto-pause failed",
+                extra={"simulation_id": simulation_id},
+            )
+        finally:
+            _pending_auto_pause.pop(simulation_id, None)
+
+    _pending_auto_pause[simulation_id] = asyncio.create_task(_run())
 
 
 class ConnectionManager:
@@ -37,13 +89,17 @@ class ConnectionManager:
         await websocket.accept()
         async with self._lock:
             self._connections[sim_id].add(websocket)
+        _cancel_scheduled_auto_pause(sim_id)
         logger.info("ws connected", extra={"simulation_id": sim_id, "total": self.total(sim_id)})
 
     async def disconnect(self, sim_id: str, websocket: WebSocket) -> None:
         async with self._lock:
             if websocket in self._connections[sim_id]:
                 self._connections[sim_id].discard(websocket)
-        logger.info("ws disconnected", extra={"simulation_id": sim_id, "total": self.total(sim_id)})
+        remaining = self.total(sim_id)
+        logger.info("ws disconnected", extra={"simulation_id": sim_id, "total": remaining})
+        if remaining == 0:
+            _schedule_auto_pause_if_config(sim_id)
 
     def total(self, sim_id: str) -> int:
         return len(self._connections.get(sim_id, set()))

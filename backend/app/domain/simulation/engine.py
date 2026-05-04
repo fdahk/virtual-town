@@ -231,19 +231,37 @@ class SimulationEngine:
     async def _load_state(self, session: AsyncSession) -> None:
         await get_scene_cache().refresh(session)
 
+        settings = get_settings()
         sim = (await session.execute(select(Simulation).limit(1))).scalar_one_or_none()
         if sim is None:
             sim = Simulation(
-                status="running" if get_settings().simulation_autostart else "idle",
+                status="running" if settings.simulation_autostart else "idle",
                 world_time=datetime(2026, 4, 30, 7, 30, tzinfo=utcnow().tzinfo),
-                world_tick_hz=get_settings().simulation_world_tick_hz,
-                ai_tick_minutes=get_settings().simulation_ai_tick_minutes,
-                speed_multiplier=get_settings().simulation_speed_default,
+                world_tick_hz=settings.simulation_world_tick_hz,
+                ai_tick_minutes=settings.simulation_ai_tick_minutes,
+                speed_multiplier=settings.simulation_speed_default,
                 current_step=0,
             )
             session.add(sim)
             await session.commit()
             await session.refresh(sim)
+        else:
+            # 冷启动收敛：尊重 SIMULATION_AUTOSTART，避免 DB 残留 status='running'
+            # 让重启后的 backend 立刻接着推进上一进程的世界（详见配置项 doc）。
+            desired = "running" if settings.simulation_autostart else "paused"
+            if sim.status != desired:
+                logger.info(
+                    "simulation status normalized on cold start",
+                    extra={
+                        "simulation_id": sim.id,
+                        "previous_status": sim.status,
+                        "new_status": desired,
+                        "autostart": settings.simulation_autostart,
+                    },
+                )
+                sim.status = desired
+                await session.commit()
+                await session.refresh(sim)
         self._simulation = sim
         self._step = sim.current_step
         self._world_time = sim.world_time

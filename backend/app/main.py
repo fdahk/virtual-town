@@ -23,7 +23,7 @@ from app.core.rate_limit_middleware import register_rate_limit_middleware
 from app.core.redis_client import get_redis
 from app.db.session import dispose_engine, get_session_factory
 from app.domain.tasks.handlers import register_default_handlers
-from app.domain.tasks.queue import init_task_queue
+from app.domain.tasks.queue import init_task_queue, reset_inflight_state_on_cold_start
 from app.domain.tasks.ttl_worker import init_ttl_worker
 from app.services.event_router import subscribe_event_router
 from app.services.observer import get_observer
@@ -60,6 +60,13 @@ async def lifespan(app: FastAPI):
     # （docker-compose worker service / `python -m app.domain.tasks.worker`）。
     register_default_handlers()
     queue = init_task_queue(session_factory)
+
+    # 冷启动收敛（2026-05）：清掉 redis_data 卷里残留的 RQ pending jobs +
+    # PG tasks 表里的 pending/running 行，避免新 worker 把上一进程的
+    # 「鬼任务」继续跑出来（详见 settings.simulation_reset_queue_on_start
+    # 注释 / docs/开发手册/debug/deployment-retrospective-2026-05.md §8）。
+    if settings.simulation_reset_queue_on_start:
+        await reset_inflight_state_on_cold_start(session_factory)
 
     # TTL 清理 worker（阶段 13 §4）：轻量级 asyncio 任务，保留在 API 进程。
     ttl_worker = init_ttl_worker(session_factory, interval_seconds=60.0)

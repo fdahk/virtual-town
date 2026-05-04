@@ -22,14 +22,14 @@ Worker 入口：``app.domain.tasks.worker`` / ``app.domain.tasks.runner.run_task
 from __future__ import annotations
 
 import asyncio
+import contextlib
+import uuid
 from datetime import timedelta
 from typing import Any
 
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import async_sessionmaker
-
-import uuid
 
 from app.core.config import get_settings
 from app.core.logging import get_logger
@@ -369,6 +369,110 @@ def init_task_queue(session_factory: async_sessionmaker) -> TaskQueue:
     return _queue
 
 
+async def reset_inflight_state_on_cold_start(
+    session_factory: async_sessionmaker,
+) -> dict[str, int]:
+    """冷启动收敛：清 RQ 三条优先级队列里的 pending jobs + 把 PG ``tasks``
+    表里 ``pending`` / ``running`` 状态收敛到 ``cancelled``。
+
+    背景：``redis_data`` / ``postgres_data`` 在 docker-compose 里都是命名卷
+    持久化，单纯重启 ``vt_backend`` / ``vt_worker`` 不会清空它们。上一进程
+    入队但 worker 尚未消费的任务（payload 里 ``trace_id`` / ``simulation_step``
+    引用的是已经消失的 in-memory 状态）会被新 worker **继续**跑出来，
+    不仅浪费 LLM 配额，还制造大量 ``failed`` 指标。
+
+    返回值：``{"queues_purged": N, "pending_deleted": N, "running_cancelled": N}``。
+    实现选择：
+
+    - 直接 ``Queue(name).empty()``，不去逐条 cancel——pending 任务在新世界里
+      已经没有意义；后续 tick 会用新的 ``simulation_step`` 触发新的入队。
+    - PG ``pending`` 行直接 ``DELETE``：``idempotency_key`` 唯一约束保留这些
+      行会让下个 tick 的同 key 入队被「返回 existing」屏蔽，无法真正补发。
+    - PG ``running`` 行 ``UPDATE`` 为 ``cancelled`` + 写 ``last_error``：
+      保留审计行；新 worker 即便误拉到也能在 runner 早期分支安全跳过。
+    - 历史 ``succeeded`` / ``failed`` / ``timeout`` 行不动，观测台指标连续。
+    """
+    from sqlalchemy import delete, update
+
+    from app.db.models import Task
+
+    settings = get_settings()
+    purged_total = 0
+    queue_names = (
+        settings.task_queue_high,
+        settings.task_queue_default,
+        settings.task_queue_low,
+    )
+
+    def _purge_rq_queues() -> int:
+        """同步清 RQ 三个优先级队列。运行在线程池里以免阻塞 event loop。"""
+        try:
+            from redis import Redis
+            from rq import Queue
+        except Exception:  # pragma: no cover - 容器内必装
+            logger.exception("rq/redis import failed; skip RQ purge on cold start")
+            return 0
+        redis = Redis.from_url(settings.redis_url, decode_responses=False)
+        purged = 0
+        try:
+            for qname in queue_names:
+                try:
+                    q = Queue(qname, connection=redis)
+                    n = q.count
+                    q.empty()
+                    purged += n
+                    logger.info(
+                        "rq queue purged on cold start: %s pending=%s",
+                        qname,
+                        n,
+                    )
+                except Exception:
+                    logger.exception("rq queue purge failed: %s", qname)
+        finally:
+            with contextlib.suppress(Exception):
+                redis.close()
+        return purged
+
+    try:
+        purged_total = await asyncio.to_thread(_purge_rq_queues)
+    except Exception:
+        logger.exception("RQ purge thread failed on cold start")
+
+    pending_deleted = 0
+    running_cancelled = 0
+    try:
+        async with session_factory() as session:
+            res_pending = await session.execute(
+                delete(Task).where(Task.status == PENDING)
+            )
+            pending_deleted = int(res_pending.rowcount or 0)
+            res_running = await session.execute(
+                update(Task)
+                .where(Task.status == RUNNING)
+                .values(
+                    status=CANCELLED,
+                    last_error="cold_start: backend restarted; in-flight task abandoned",
+                    finished_at=utcnow(),
+                )
+            )
+            running_cancelled = int(res_running.rowcount or 0)
+            await session.commit()
+    except Exception:
+        logger.exception("PG tasks reset failed on cold start")
+
+    logger.info(
+        "cold start tasks reset: rq_purged=%s pending_deleted=%s running_cancelled=%s",
+        purged_total,
+        pending_deleted,
+        running_cancelled,
+    )
+    return {
+        "queues_purged": purged_total,
+        "pending_deleted": pending_deleted,
+        "running_cancelled": running_cancelled,
+    }
+
+
 __all__ = [
     "CANCELLED",
     "FAILED",
@@ -380,4 +484,5 @@ __all__ = [
     "build_idempotency_key",
     "get_task_queue",
     "init_task_queue",
+    "reset_inflight_state_on_cold_start",
 ]

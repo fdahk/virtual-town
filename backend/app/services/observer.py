@@ -84,8 +84,9 @@ class Observer:
         *,
         flush_interval: float = 1.5,
         batch_size: int = 200,
+        buffer_max_size: int = 2000,
     ) -> None:
-        self._buf = _Buffer()
+        self._buf = _Buffer(max_size=buffer_max_size)
         self._lock = asyncio.Lock()
         self._session_factory: async_sessionmaker | None = None
         self._flush_task: asyncio.Task[None] | None = None
@@ -383,14 +384,14 @@ class Observer:
 
         try:
             async with self._session_factory() as session:
-                for record in events:
-                    session.add(ObservabilityEvent(**record))
-                for record in llm_calls:
-                    session.add(LLMCallRecord(**record))
-                for record in tool_calls:
-                    session.add(ToolCallRecord(**record))
-                for record in task_status:
-                    session.add(TaskStatusLog(**record))
+                if events:
+                    session.add_all([ObservabilityEvent(**rec) for rec in events])
+                if llm_calls:
+                    session.add_all([LLMCallRecord(**rec) for rec in llm_calls])
+                if tool_calls:
+                    session.add_all([ToolCallRecord(**rec) for rec in tool_calls])
+                if task_status:
+                    session.add_all([TaskStatusLog(**rec) for rec in task_status])
                 await session.commit()
         except Exception:
             logger.exception(
@@ -473,7 +474,14 @@ _observer: Observer | None = None
 def get_observer() -> Observer:
     global _observer
     if _observer is None:
-        _observer = Observer()
+        from app.core.config import get_settings
+
+        s = get_settings()
+        _observer = Observer(
+            flush_interval=s.observability_flush_interval,
+            batch_size=s.observability_batch_size,
+            buffer_max_size=s.observability_buffer_max_size,
+        )
     return _observer
 
 

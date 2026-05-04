@@ -49,3 +49,14 @@ Demo 栈已在 **`frontend/nginx.demo.conf`** 里用 **nginx 反代** `/api`、`
 - 创建一个空目录（或已有旧代码），路径与 **DEPLOY_PATH** 一致即可；**无需**预先 `git clone`，CI 会 `rsync` 同步仓库内容（排除 `.git`、`node_modules` 等）。
 - 若你希望**仅**在服务器上 `git pull` 更新而不让 CI 覆盖工作区，可自行调整 workflow（去掉 rsync 步骤、SSH 不传 `DEPLOY_SKIP_GIT=1`），并保证 **DEPLOY_PATH** 为可 `git fetch origin main` 的 clone。
 - 防火墙放行 **8080**（前端）与 **8000**（API，若需外网调 OpenAPI）。
+
+---
+
+## 部署后容器仍是旧的？
+
+CI 成功但 `docker ps` 里 **vt_backend** 等 **CREATED** 时间不变时，优先排查：
+
+1. **DEPLOY_PATH** 是否就是你在服务器上执行 `docker compose` 的目录（`pwd` / `readlink -f .` 一致）。
+2. **本机是否还有另一套**手工 `docker compose` 起的栈（别的目录 / 别的 compose 文件），你看的是那一套旧容器。
+3. **构建缓存**：在服务器上 `export DEPLOY_BUILD_NO_CACHE=1` 后再跑一次 `deploy_remote.sh`；或在 GitHub SSH 一步里给远端加上该 export。
+4. 需要连 **postgres/redis** 也换新容器外壳（数据仍在卷内）：`export DEPLOY_RECREATE_DATA_CONTAINERS=1` 后重跑脚本。

@@ -22,7 +22,7 @@
 - **graceful drain**：收到 SIGINT/SIGTERM 后停止 BLPOP，再等待已在跑的
   并发任务最多 30s 完成，避免 in-flight 任务被强切。
 
-并发数通过 ``settings.task_queue_worker_concurrency`` 配置（默认 8）。
+并发数通过 ``settings.task_queue_worker_concurrency`` 配置（默认 18）。
 若需扩到多机，仍可像以前那样 ``docker compose up --scale worker=N``，
 每个副本各自跑 N 个并发槽，互不冲突。
 """

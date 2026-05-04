@@ -155,24 +155,38 @@ jobs:
             -e "ssh -i $HOME/.ssh/deploy_key -o StrictHostKeyChecking=accept-new -o ConnectTimeout=30" \
             ./ "${DEPLOY_USER}@${DEPLOY_HOST}:${DEPLOY_PATH}/"
 
-      - name: Upload .env and run deploy script
+      # 参考 paaawow_backend：appleboy/ssh-action 可拉长时间；其默认 command_timeout 仅 10m，
+      # 首次/无缓存 docker build 容易在「已起 postgres/redis、尚未 up backend」处被掐断，表现为只剩数据层容器。
+      - name: Upload .env to server
         env:
           DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
           DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
           DEPLOY_PATH: ${{ secrets.DEPLOY_PATH }}
-          DEPLOY_COMPOSE_FILE: ${{ secrets.DEPLOY_COMPOSE_FILE }}
         run: |
           set -euo pipefail
           test -n "${DEPLOY_PATH:-}" || { echo "缺少 secret: DEPLOY_PATH" >&2; exit 1; }
-          CF="${DEPLOY_COMPOSE_FILE:-docker-compose.demo.yml}"
           scp -i ~/.ssh/deploy_key \
             -o StrictHostKeyChecking=accept-new \
             -o ConnectTimeout=30 \
             /tmp/virtual-town.env \
             "${DEPLOY_USER}@${DEPLOY_HOST}:${DEPLOY_PATH}/.env"
-          ssh -i ~/.ssh/deploy_key \
-            -o StrictHostKeyChecking=accept-new \
-            -o ConnectTimeout=30 \
-            "${DEPLOY_USER}@${DEPLOY_HOST}" \
-            "export DEPLOY_PATH='${DEPLOY_PATH}'; export COMPOSE_FILE='${CF}'; export DEPLOY_SKIP_GIT=1; bash -s" \
-            < scripts/deploy_remote.sh
+
+      - name: Run deploy on server
+        uses: appleboy/ssh-action@v1.2.0
+        with:
+          host: ${{ secrets.DEPLOY_HOST }}
+          username: ${{ secrets.DEPLOY_USER }}
+          # 与 rsync 共用 Configure SSH 步骤写入的私钥与 known_hosts（accept-new）
+          key_path: /home/runner/.ssh/deploy_key
+          timeout: 60s
+          command_timeout: 30m
+          script_stop: true
+          script: |
+            set -euo pipefail
+            export DEPLOY_PATH='${{ secrets.DEPLOY_PATH }}'
+            export DEPLOY_SKIP_GIT=1
+            CMF='${{ secrets.DEPLOY_COMPOSE_FILE }}'
+            export COMPOSE_FILE="${CMF:-docker-compose.demo.yml}"
+            cd "$DEPLOY_PATH"
+            test -f scripts/deploy_remote.sh
+            bash scripts/deploy_remote.sh

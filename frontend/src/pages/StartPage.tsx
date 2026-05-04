@@ -14,8 +14,9 @@ interface Props {
  * 应用入口"开始页"。
  *
  * - 探查后端 simulation 状态：
- *   - status=running → 显示「继续当前世界」入口
- *   - 其它 / 无 → 默认隐藏入口
+ *   - status=running / paused → 显示「继续当前世界」入口
+ *     （冷启动会被收敛到 paused，玩家点击后由 TownPage 顶部的时间控制恢复）
+ *   - idle / stopped / 无       → 隐藏入口
  * - 始终显示「新游戏」+「读档」两条主路径
  *
  * 「新游戏」打开 NewGameWizard 三步向导；「读档」用隐藏的 file picker
@@ -39,7 +40,10 @@ export function StartPage({ onEnterTown }: Props) {
     })();
   }, []);
 
-  const continueAvailable = sim != null && sim.status === "running";
+  // running / paused 都允许「继续」：后端冷启动后会把 status 收敛为 paused
+  // （SIMULATION_AUTOSTART=false 的预期语义），玩家进入小镇后再恢复。
+  const continueAvailable = sim != null && (sim.status === "running" || sim.status === "paused");
+  const continueIsPaused = sim?.status === "paused";
 
   /**
    * 读档主流程：
@@ -96,9 +100,10 @@ export function StartPage({ onEnterTown }: Props) {
       <div style={styles.menu}>
         {continueAvailable && (
           <button style={styles.continueBtn} onClick={() => onEnterTown()}>
-            继续当前世界
+            {continueIsPaused ? "继续当前世界（已暂停）" : "继续当前世界"}
             <span style={styles.btnSub}>
               已运行 {sim?.current_step ?? 0} 步 · 速度 ×{sim?.speed_multiplier ?? 1}
+              {continueIsPaused ? " · 进入后从顶部时间控制恢复" : ""}
             </span>
           </button>
         )}

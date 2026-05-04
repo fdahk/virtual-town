@@ -86,7 +86,34 @@ class Settings(BaseSettings):
     world_gen_outdoor_default_height: int = Field(default=90, ge=90, le=200)
     # 默认 False：用户必须从前端「开始页」手动点「新游戏」或「读档」启动仿真，
     # 避免后端起步时悄悄运行一个旧世界。需要 CI 自动启动仿真时显式置 True。
+    #
+    # 历史 bug：仅在「DB 中没有 simulation 行」的首次 seed 时生效；后续重启
+    # 容器，``_load_state`` 直接复用 DB 里残留的 ``status='running'``，让本配置
+    # 等价于被绕过。修复后（2026-05），lifespan 启动时**所有分支**都会按本字段
+    # 收敛 status：False → ``paused``，True → ``running``。详见
+    # ``docs/开发手册/debug/deployment-retrospective-2026-05.md`` §8。
     simulation_autostart: bool = Field(default=False)
+    # 冷启动时是否清空 RQ 队列里残留的「待跑/进行中」任务。
+    #
+    # ``redis_data`` 是命名卷持久化，``vt_redis`` 容器重启后 RQ ``vt:default``
+    # 队列里上一进程入队的 jobs 仍然可见；新 worker 起来会**继续消费**这些
+    # 引用了上一进程内存（trace_id / simulation_step / agent 状态）的过期任务，
+    # 既浪费 LLM 配额，也制造 ``failed`` 指标雪崩。冷启动一次性清队列 +
+    # 把 PG ``tasks`` 表里 ``pending`` / ``running`` 收敛到 ``cancelled``，
+    # 保留 ``succeeded`` / ``failed`` 历史指标，可观测性更稳定。
+    #
+    # 默认 True；只在你**确实**希望「重启后接着跑老任务」时（极少见）设为 False。
+    simulation_reset_queue_on_start: bool = Field(default=True)
+    # 所有「游戏内」WebSocket（/ws/simulations/{id}，前端 Town 场景）断开后，
+    # 是否在等待若干秒仍无人重连时自动暂停仿真。
+    #
+    # 观测台 /ws/observability 不计入：避免研发开着 Dashboard 仍被当成「无人在线」。
+    # 暂停后引擎不再 _tick()，也就不会继续往 RQ 入队新决策；队列里已有 backlog
+    # 仍可能由 worker 短暂消费完，属正常现象。
+    simulation_auto_pause_when_no_game_ws_clients: bool = Field(default=True)
+    # 最后一个游戏 WS 断开到真正执行 pause 的延迟（秒）。给 Tab 刷新 / 短断网留缓冲，
+    # 避免一断就连暂停。
+    simulation_auto_pause_after_idle_seconds: float = Field(default=45.0, ge=0.0, le=3600.0)
     # 异步任务队列（阶段 12 — Redis + RQ）
     # - async: 投递到 RQ 队列，由独立 worker 进程消费（默认；见 docker-compose `worker` service）
     # - sync:  保留原先 inline 的 LLM 决策路径，便于 e2e 与回归
@@ -103,24 +130,24 @@ class Settings(BaseSettings):
     # 单容器内的并发槽位见 ``task_queue_worker_concurrency``。
     task_queue_worker_count: int = Field(default=1)
     # 单 worker 容器内的并发槽位数（阶段 21+：自定义 async 并发模型）。
-    # 22 NPC 的 ``agent_decision`` 任务以 LLM I/O 为主，单进程跑 16 个并发槽位
-    # 把吞吐从 ~0.2 jobs/s 拉到 ~3.2 jobs/s，给 LLM 慢响应抖动留出舒适余量
-    # （再叠加决策锁去重，22 NPC 入队稳态会自适应到与吞吐对齐）。
+    # 22 NPC 的 ``agent_decision`` 以 LLM I/O 为主；并发槽≈吞吐上限（≈ slots / p95_latency）。
     #
-    # 调参约束：本字段 × (1-2 session/任务) 必须 ≤ ``app/db/session.py`` 的
-    # ``pool_size + max_overflow``（当前 20+20=40），否则任务会卡在等 DB 连接。
-    # 当前 16 槽位 × 2 ≈ 32 个连接，仍有 8 个余量给 ttl_worker / scheduler 等。
-    # 若要再扩到 32 槽位，需同步把 pool_size / max_overflow 一起调到 32/32。
-    task_queue_worker_concurrency: int = Field(default=16)
+    # 调参约束：单进程 ``pool_size + max_overflow``（见 ``app/db/session.py``）须 ≥
+    # ``本字段 × (1–2 条并发 DB session / 任务)``。**多副本 worker**（``docker compose
+    # --scale worker=N``）时，每个副本各有独立连接池 —— 总峰值连接数近似
+    # ``N × 池上限 + backend 进程``，勿超过 Postgres ``max_connections``；不足时
+    # 应**先减本字段或单池上限**，再扩副本。
+    task_queue_worker_concurrency: int = Field(default=18, ge=1, le=64)
     # 兼容旧字段名（.env 中可能还写着 TASK_QUEUE_CONCURRENCY）
     task_queue_concurrency: int = Field(default=2)
     # ``agent_decision`` 任务在队列中等待的 deadline（秒）。
-    # 阶段 21+ 调参：60 → 90，给并发 worker + 决策锁的稳态留出余量；
-    # 同时仍保证已严重过期的决策不会浪费 LLM 调用。
-    agent_decision_deadline_seconds: float = Field(default=90.0)
-    # 观测
-    observability_flush_interval: float = Field(default=1.5)
-    observability_batch_size: int = Field(default=200)
+    # 略宽裕可减少队列淤积时的无谓超时丢弃；过大则会浪费 LLM 在已过仿真步的任务上。
+    agent_decision_deadline_seconds: float = Field(default=105.0, ge=10.0, le=600.0)
+    # 观测批量落库：略增大间隔/批量，降低高 tick 负载下观测写库频率（Dashboard 延迟 +~0.5s 可接受）。
+    observability_flush_interval: float = Field(default=2.0, ge=0.2, le=30.0)
+    observability_batch_size: int = Field(default=280, ge=20, le=5000)
+    # 观测内存缓冲上限（条数_bucket），四项 deque 共用丢弃策略见 ``Observer._Buffer.drop_overflow``。
+    observability_buffer_max_size: int = Field(default=4000, ge=500, le=50000)
 
     # 阶段 18：安全 / 内容安全
     # 每个玩家在 security_rate_window_seconds 秒内最多发送
