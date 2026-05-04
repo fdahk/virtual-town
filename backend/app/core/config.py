@@ -68,6 +68,9 @@ class Settings(BaseSettings):
     # 仿真
     # 默认 2Hz：每真实秒推进约 2 游戏分钟（1× 倍速下）；原为 5Hz 偏快，易放大 LLM/记忆入队压力。
     simulation_world_tick_hz: float = Field(default=2.0)
+    # 同一游戏分钟内路径推进的子步数：不影响游戏钟快慢（仍由 world_tick_hz×speed 决定），
+    # 只提高每分钟内格子位移与 WS 推送的细分次数，减轻「tick 变慢后人走得一顿一顿」。
+    simulation_movement_substeps_per_game_tick: int = Field(default=3, ge=1, le=16)
     # 阶段 19+++ 调参：5 → 3，让 NPC 决策更频繁、社交反应更灵
     simulation_ai_tick_minutes: int = Field(default=3)
     simulation_speed_default: float = Field(default=1.0)

@@ -387,49 +387,25 @@ class SimulationEngine:
                     await asyncio.sleep(0.2)
                     continue
                 await self._tick()
-                # world tick：HZ 受 speed_multiplier 影响
-                hz = max(self._simulation.world_tick_hz * self._simulation.speed_multiplier, 0.5)
-                await asyncio.sleep(1.0 / hz)
+                # 仿真节拍全部由 ``_tick`` 承担：路径子步之间已 ``sleep(period/subticks)``
+                # （合计 ``period``）；此处若再 ``sleep(period)`` 会双倍拉长周期，
+                # 并在「演化/决策/持久化」阶段后出现一整段空白停顿，观感卡顿。
         except asyncio.CancelledError:
             raise
         except Exception:
             logger.exception("simulation engine crashed")
 
-    async def _tick(self) -> None:
-        sim = self._simulation
-        assert sim is not None
-
-        # 推进游戏内时间：一次 world tick = 1 游戏分钟（speed 只乘 Hz，不缩分钟粒度）
-        # 默认 world_tick_hz=2、speed=1 ⇒ 每真实秒推进约 2 游戏分钟
-        minutes_per_tick = 1
-        self._world_time = self._world_time + timedelta(minutes=minutes_per_tick)
-        self._step += 1
-        # 每个 world tick 作为一条 trace 的顶层 span。
-        # 子模块（决策、工具、LLM）在同一 trace 下嵌套 span。
-        with TraceContext.start_trace(
-            "world_tick",
-            simulation_id=self._sim_id(),
-        ):
-            await self._tick_inner()
-
-    async def _tick_inner(self) -> None:
-        sim = self._simulation
-        assert sim is not None
-
-        entity_updates: list[AgentRuntimeState] = []
-        now_dt = self._world_time
-
-        # 1. 处理玩家输入
+    async def _drain_player_input_queue(self) -> None:
         while self._input_queue:
             evt = self._input_queue.popleft()
             await self._handle_input(evt)
 
-        # 2. 每个 Agent 推进已有路径 / 触发到达
+    async def _advance_paths_one_step_all_agents_and_player(self) -> None:
+        """单步子步：沿 path 前进一格（同一游戏分钟内可调用多次）。"""
         for agent in self._agents.values():
             if agent.is_player:
                 continue
             if agent.state == "CHATTING":
-                # 对话中不移动
                 continue
             if agent.path:
                 next_tile = agent.path[0]
@@ -441,7 +417,6 @@ class SimulationEngine:
                 if not agent.path:
                     await self._on_agent_arrived(agent)
 
-        # 3. 玩家按路径自动前进
         player = self._current_player()
         if player is not None and player.path:
             next_tile = player.path[0]
@@ -452,29 +427,58 @@ class SimulationEngine:
             player.dirty = True
             await self._check_player_environment(player)
 
-        # 阶段 19+：基础需求随时间演化（驱动 LLM 主动选 socialize / have_meal / rest_at）
+    async def _tick(self) -> None:
+        sim = self._simulation
+        assert sim is not None
+
+        settings = get_settings()
+        subticks = max(1, settings.simulation_movement_substeps_per_game_tick)
+        hz = max(sim.world_tick_hz * sim.speed_multiplier, 0.5)
+        period = 1.0 / hz
+        slice_sleep = period / subticks
+
+        # 推进游戏钟（决策 / 自然事件仍以「仿真分钟」为节拍）
+        minutes_per_tick = 1
+        self._world_time = self._world_time + timedelta(minutes=minutes_per_tick)
+        self._step += 1
+        now_dt = self._world_time
+
+        with TraceContext.start_trace(
+            "world_tick",
+            simulation_id=self._sim_id(),
+        ):
+            await self._drain_player_input_queue()
+            # 路径细分：在同一真实周期 ``period`` 内多次位移并推送 WS，减轻低 Hz 下的卡顿感。
+            for _ in range(subticks):
+                await self._advance_paths_one_step_all_agents_and_player()
+                intermediate_updates = [
+                    self._to_runtime_state(a)
+                    for a in self._agents.values()
+                    if a.dirty
+                ]
+                await self._broadcast_delta(intermediate_updates, [])
+                await asyncio.sleep(slice_sleep)
+
+            await self._tick_simulation_phase(sim, now_dt)
+
+    async def _tick_simulation_phase(self, sim: Simulation, now_dt: datetime) -> None:
+        """同一仿真分钟内：需求演化 → 决策 → 自然事件 → 持久化（不含路径子步）。"""
+        entity_updates: list[AgentRuntimeState] = []
+
         self._evolve_basic_needs(now_dt)
 
-        # 阶段 19+++：刷新主动追踪（go_to_entity 工具发起）
-        # —— 必须放在路径推进之后、决策之前，防止决策清掉 pursuit path
         self._refresh_pursuits()
 
-        # 4. AI Decision Tick（每个 Agent 独立按游戏分钟间隔决策）
         await self._decide_all(now_dt)
-        # 阶段 19+：周期性扫描自主社交邂逅（两个空闲 NPC 靠近 + 一方 social_need 高 → 自动 chat）
         await self._scan_social_encounters(now_dt)
-        # 反思/日结通过 daily_reflection 任务异步执行，不阻塞世界 tick
         await self._enqueue_reflect_batch(now_dt)
 
-        # 4.5 自然事件 tick（修改 EngineObject.state，生成 WorldEvent）
         self._tick_natural_events(now_dt)
 
-        # 5. 汇总 updates
         for agent in self._agents.values():
             if agent.dirty:
                 entity_updates.append(self._to_runtime_state(agent))
 
-        # 6. 持久化 + 广播
         events_to_broadcast = list(self._pending_events)
         self._pending_events.clear()
         await self._persist_tick(sim, entity_updates, events_to_broadcast)
