@@ -154,6 +154,7 @@ class SimulationEngine:
         self._agents: dict[str, EngineAgent] = {}
         self._agents_meta: dict[str, Agent] = {}
         self._locations: dict[str, dict[str, Any]] = {}
+        self._scene_type_by_id: dict[str, str] = {}
         self._portals_by_scene: dict[str, list[Portal]] = {}
         self._portals: dict[str, Portal] = {}
         self._player_id: str | None = None
@@ -329,6 +330,8 @@ class SimulationEngine:
             }
             for l in loc_rows
         }
+        scene_rows = (await session.execute(select(MapScene))).scalars().all()
+        self._scene_type_by_id = {s.id: s.scene_type for s in scene_rows}
         portals = (await session.execute(select(Portal))).scalars().all()
         self._portals = {p.id: p for p in portals}
         self._portals_by_scene.clear()
@@ -858,6 +861,7 @@ class SimulationEngine:
                         portals_by_scene=self._portals_by_scene,
                         natural_ctx=natural_ctx,
                         unreachable_location_ids=self._get_unreachable_locations(agent.id),
+                        scene_type_by_id=self._scene_type_by_id,
                     )
             except Exception:
                 logger.exception("decide failed for %s", agent.id)

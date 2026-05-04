@@ -222,12 +222,15 @@ def decide_human_action(
     portals_by_scene: dict[str, list[Any]] | None = None,
     natural_ctx: NaturalWorldContext | None = None,
     unreachable_location_ids: set[str] | None = None,
+    scene_type_by_id: dict[str, str] | None = None,
 ) -> AgentDecision:
     """
     人类 NPC 规则决策。
 
     优先级：
-    1. 暴风雨自保（storm_active）→ 跑向最近室内
+    1. 暴风雨自保（storm_active）→ **仅在室外场景**跑向某一室内入口；
+       已在 indoor 场景（MapScene.scene_type）则不再强行跨场景避难，
+       避免「进屋后又触发去找别的建筑」而反复.portal 振荡。
     2. 火灾响应（nearby_fires）→ 按性格决定救援/逃离/围观
     3. 正常日程（schedule_template）
 
@@ -239,9 +242,11 @@ def decide_human_action(
     nat = natural_ctx or NaturalWorldContext()
     blacklist = unreachable_location_ids or set()
 
-    # ── 1. 暴风雨优先逃入建筑 ────────────────────────────────────────────────
+    # ── 1. 暴风雨优先逃入建筑（仅当前在室外时）───────────────────────────────────
     if nat.storm_active:
-        override = _decide_storm_shelter(agent_row, state_row, locations, grids, _portals)
+        override = _decide_storm_shelter(
+            agent_row, state_row, locations, grids, _portals, scene_type_by_id
+        )
         if override is not None:
             return override
 
@@ -428,8 +433,15 @@ def _decide_storm_shelter(
     locations: dict[str, dict[str, Any]],
     grids: dict[str, SceneGrid],
     portals_by_scene: dict[str, list[Any]],
+    scene_type_by_id: dict[str, str] | None,
 ) -> AgentDecision | None:
-    """暴风雨时找最近的室内地点。"""
+    """暴风雨时：仅在室外 NPC 身上尝试找到通往某一室内的 portal。
+
+    已在 indoor 场景视为已避风，返回 None 交给日程（如在咖啡店继续迎客）。
+    """
+    kind = scene_type_by_id.get(state_row.scene_id) if scene_type_by_id else None
+    if kind == "indoor":
+        return None
     indoor_locs = [
         loc for loc in locations.values()
         if loc.get("scene_id") != state_row.scene_id  # 在其他（室内）场景
