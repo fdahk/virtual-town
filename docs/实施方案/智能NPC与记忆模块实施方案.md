@@ -614,7 +614,7 @@ WorldEvent 落库后 → bus.publish(WORLD_EVENT_TOPIC) →
 **配套修复**（自然事件源头）：`NoticeEventHandler` / `StormShelterEventHandler`
 之前用 `ctx.already_seen()`，但 `NaturalEventContext` 每 tick 重建，`world_time.hour`
 键也只在同一 tick 起作用 → NPC 站在告示牌附近时**每 world tick 都生成一条事件**
-（5 Hz × 多 NPC = 一秒 N 条刷屏）。新增 `recently_seen(key, minutes=...)` 跨 tick 去重，
+（较高 world_tick_hz × 多 NPC = 一秒内多条候选）。新增 `recently_seen(key, minutes=...)` 跨 tick 去重，
 告示牌 6 仿真小时一次，暴风雨警告 1 仿真小时一次。
 
 ### 10.7 验收（手动观察 / 日志）

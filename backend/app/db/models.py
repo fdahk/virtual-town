@@ -370,7 +370,7 @@ class Simulation(Base, TimestampMixin):
     id: Mapped[str] = mapped_column(String(64), primary_key=True, default=_uuid)
     status: Mapped[str] = mapped_column(String(16), nullable=False, default="running")
     world_time: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
-    world_tick_hz: Mapped[float] = mapped_column(Float, nullable=False, default=5.0)
+    world_tick_hz: Mapped[float] = mapped_column(Float, nullable=False, default=2.0)
     ai_tick_minutes: Mapped[int] = mapped_column(Integer, nullable=False, default=5)
     speed_multiplier: Mapped[float] = mapped_column(Float, nullable=False, default=1.0)
     current_step: Mapped[int] = mapped_column(Integer, nullable=False, default=0)

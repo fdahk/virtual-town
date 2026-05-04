@@ -53,6 +53,7 @@ from app.db.templates import (
 )
 from app.domain.world_gen import GenerationConfig, apply_plan, generate_world
 from app.domain.world_gen.apply import CLEAR_TABLES, apply_plan_async
+from app.schemas.simulation import normalize_simulation_speed_multiplier
 from app.services.simulation_runtime import get_simulation_runtime
 
 logger = get_logger(__name__)
@@ -515,9 +516,11 @@ async def import_save(session: AsyncSession, payload: dict[str, Any]) -> dict[st
         id=sim_payload.get("id") or _new_sim_id(),
         status=sim_payload.get("status", "paused"),
         world_time=_parse_iso(sim_payload.get("world_time")) or datetime.now(timezone.utc),
-        world_tick_hz=sim_payload.get("world_tick_hz", 5.0),
+        world_tick_hz=sim_payload.get("world_tick_hz", 2.0),
         ai_tick_minutes=sim_payload.get("ai_tick_minutes", 5),
-        speed_multiplier=sim_payload.get("speed_multiplier", 1.0),
+        speed_multiplier=normalize_simulation_speed_multiplier(
+            float(sim_payload.get("speed_multiplier", 1.0))
+        ),
         current_step=sim_payload.get("current_step", 0),
     )
     session.add(sim)

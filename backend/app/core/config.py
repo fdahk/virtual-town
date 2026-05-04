@@ -66,7 +66,8 @@ class Settings(BaseSettings):
     llm_query_rewrite_model: str = Field(default="")
 
     # 仿真
-    simulation_world_tick_hz: float = Field(default=5.0)
+    # 默认 2Hz：每真实秒推进约 2 游戏分钟（1× 倍速下）；原为 5Hz 偏快，易放大 LLM/记忆入队压力。
+    simulation_world_tick_hz: float = Field(default=2.0)
     # 阶段 19+++ 调参：5 → 3，让 NPC 决策更频繁、社交反应更灵
     simulation_ai_tick_minutes: int = Field(default=3)
     simulation_speed_default: float = Field(default=1.0)
@@ -226,6 +227,13 @@ class Settings(BaseSettings):
     # 邂逅触发后该 NPC 在多少仿真分钟内不再主动邂逅别人
     # 阶段 19+++ 调参：20 → 10，避免冷却期过长冷场
     social_encounter_cooldown_minutes: int = Field(default=10)
+
+    @field_validator("simulation_speed_default")
+    @classmethod
+    def simulation_speed_default_to_tier(cls, v: float) -> float:
+        from app.schemas.simulation import normalize_simulation_speed_multiplier
+
+        return normalize_simulation_speed_multiplier(float(v))
 
     @field_validator("backend_cors_origins")
     @classmethod

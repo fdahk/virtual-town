@@ -305,7 +305,7 @@ OBSERVABILITY_BUFFER_MAX_SIZE=4000
 
 **多玩家与「谁的世界」？** 当前是 **单世界 MVP**：数据库里通常只有 **一行** `simulation`（`engine._load_state` 用 `limit(1)`），全进程 **一个** `SimulationEngine`。REST `/players/me` **不做登录鉴权**，谁连到同一后端，看到的是**同一条** `GET /simulations/current`、同一个世界快照；多开浏览器等于**共享**这一个世界与同一个「玩家」角色，**没有**按用户 ID 隔离多实例世界。**不能**在同一套进程模型里同时跑多个相互独立、各有一套 22 NPC 的「租户世界」——要支持需要多引擎 / 多租户路由 / 鉴权，属于架构升级，不在当前 MVP 范围。
 
-**观测台里事件 / 任务很多 = 性能不够？** 不一定。**任务队列 pending 大**多半说明 **LLM 慢 + worker 吞吐 < NPC 入队速率**（或历史积压未清），世界 tick 仍可能在跑，_NPC 决策_会滞后。**世界事件**条数随 `current_step` 增长是正常现象；若关心 **背压**，优先：**加 worker 副本**（`docker compose up --scale worker=N`）、酌情调 `TASK_QUEUE_WORKER_CONCURRENCY`（须 ≤ DB 连接池余量，见 `config.py` 注释）、略降 `SIMULATION_WORLD_TICK_HZ` 或略增 `SIMULATION_AI_TICK_MINUTES` 减轻入队压力、关 LLM 或压测时减小 NPC 数。若仍不足再考虑代码层批处理 / 优先级策略，而不是先改「整体架构」。
+**观测台里事件 / 任务很多 = 性能不够？** 不一定。**任务队列 pending 大**多半说明 **LLM 慢 + worker 吞吐 < NPC 入队速率**（或历史积压未清），世界 tick 仍可能在跑，_NPC 决策_会滞后。**世界事件**条数随 `current_step` 增长是正常现象；若关心 **背压**，优先：**加 worker 副本**（`docker compose up --scale worker=N`）、酌情调 `TASK_QUEUE_WORKER_CONCURRENCY`（须 ≤ DB 连接池余量，见 `config.py` 注释）、略降 `SIMULATION_WORLD_TICK_HZ`（默认 2）或略增 `SIMULATION_AI_TICK_MINUTES` 减轻入队压力、关 LLM 或压测时减小 NPC 数。若仍不足再考虑代码层批处理 / 优先级策略，而不是先改「整体架构」。
 
 
 ## E2E 验收

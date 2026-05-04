@@ -5,9 +5,29 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 from app.schemas.agent import AgentRuntimeState
+
+# 仅三档（与前端 TimeControl 一致）。API 请求必须精确命中其一；导入 / 冷启动走 normalize。
+SIMULATION_SPEED_TIERS: tuple[float, ...] = (0.5, 1.0, 2.0)
+_SPEED_TIER_EPS = 1e-6
+
+
+def normalize_simulation_speed_multiplier(v: float) -> float:
+    """旧存档或导入 JSON：落到几何距离最近的一档。"""
+    x = float(v)
+    return min(SIMULATION_SPEED_TIERS, key=lambda t: abs(t - x))
+
+
+def parse_strict_speed_multiplier(v: float) -> float:
+    """POST set_speed / create_simulation：必须是三档之一。"""
+    x = float(v)
+    for t in SIMULATION_SPEED_TIERS:
+        if abs(x - t) <= _SPEED_TIER_EPS:
+            return t
+    allowed = ", ".join(str(t) for t in SIMULATION_SPEED_TIERS)
+    raise ValueError(f"speed_multiplier must be one of ({allowed}), got {v}")
 
 
 class Simulation(BaseModel):
@@ -77,10 +97,20 @@ class SimulationStateDelta(BaseModel):
 
 
 class SetSpeedRequest(BaseModel):
-    speed_multiplier: float = Field(..., ge=0.1, le=10.0)
+    speed_multiplier: float
+
+    @field_validator("speed_multiplier")
+    @classmethod
+    def _speed_must_be_tier(cls, v: float) -> float:
+        return parse_strict_speed_multiplier(v)
 
 
 class CreateSimulationRequest(BaseModel):
-    world_tick_hz: float = 5.0
+    world_tick_hz: float = 2.0
     ai_tick_minutes: int = 5
-    speed_multiplier: float = 1.0
+    speed_multiplier: float = Field(default=1.0)
+
+    @field_validator("speed_multiplier")
+    @classmethod
+    def _speed_must_be_tier(cls, v: float) -> float:
+        return parse_strict_speed_multiplier(v)

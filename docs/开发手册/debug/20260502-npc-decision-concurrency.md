@@ -30,9 +30,9 @@
 
 | 项 | 值 | 说明 |
 |----|----|------|
-| `simulation_world_tick_hz` | 5 Hz | 1 真实秒推进 5 仿真分钟 |
+| `simulation_world_tick_hz` | 2 Hz（可调） | 1 真实秒推进约 2 仿真分钟（×speed） |
 | `simulation_ai_tick_minutes` | 3 | 单 NPC 每 3 仿真分钟决策一次 |
-| 单 NPC 入队节奏 | 0.6 真实秒 / 次 | = `ai_tick_minutes / world_tick_hz` |
+| 单 NPC 入队节奏 | ≈1.5 真实秒 / 次（默认） | = `ai_tick_minutes / world_tick_hz` |
 | 22 NPC 稳态入队率 | **~36.7 jobs/s** | = `22 / 0.6` |
 
 worker 端：

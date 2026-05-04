@@ -215,7 +215,7 @@ async def _bump_refusal_counter(requester_id: str, target_id: str) -> None:
             return
         key = _refusal_key(requester_id, target_id)
         await client.incr(key)
-        # 取真实秒等价于 30 仿真分钟（默认 5 Hz tick：30min = 30*60/5 = 360s）
+        # TTL（秒）：``social_cooldown_after_refusal_minutes * 12``（下限 60）
         ttl = max(60, get_settings().social_cooldown_after_refusal_minutes * 12)
         await client.expire(key, ttl)
     except Exception:

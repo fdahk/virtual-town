@@ -1,6 +1,9 @@
 import { useWorldStore } from "../stores/worldStore";
 import { api } from "../api";
 
+/** UI 三档；后端 POST /speed 亦只允许 0.5 / 1 / 2（非法存档导入会归整到最近一档） */
+const SPEED_TIERS = [0.5, 1, 2] as const;
+
 export function TimeControl() {
   const sim = useWorldStore((s) => s.simulation);
   const setSim = useWorldStore((s) => s.setSimulation);
@@ -36,7 +39,7 @@ export function TimeControl() {
       <button style={styles.btn} onClick={toggle}>
         {sim.status === "running" ? "⏸ 暂停" : "▶ 继续"}
       </button>
-      {[0.5, 1, 2, 4].map((s) => (
+      {SPEED_TIERS.map((s) => (
         <button
           key={s}
           style={{

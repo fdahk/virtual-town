@@ -69,6 +69,7 @@ from app.schemas.simulation import (
     Simulation as SimulationSchema,
     SimulationDeltaPayload,
     WorldEvent as WorldEventSchema,
+    normalize_simulation_speed_multiplier,
 )
 from app.schemas.world import TilePosition
 from app.services.agent_service import runtime_from_orm
@@ -262,6 +263,11 @@ class SimulationEngine:
                 sim.status = desired
                 await session.commit()
                 await session.refresh(sim)
+        prev_sp = sim.speed_multiplier
+        sim.speed_multiplier = normalize_simulation_speed_multiplier(prev_sp)
+        if sim.speed_multiplier != prev_sp:
+            await session.commit()
+            await session.refresh(sim)
         self._simulation = sim
         self._step = sim.current_step
         self._world_time = sim.world_time
@@ -390,8 +396,8 @@ class SimulationEngine:
         sim = self._simulation
         assert sim is not None
 
-        # 推进游戏内时间：一次 world tick = 1 游戏分钟 / speed_multiplier
-        # 这样 5 Hz + speed=1 => 游戏时间 5 分钟 / 真实秒
+        # 推进游戏内时间：一次 world tick = 1 游戏分钟（speed 只乘 Hz，不缩分钟粒度）
+        # 默认 world_tick_hz=2、speed=1 ⇒ 每真实秒推进约 2 游戏分钟
         minutes_per_tick = 1
         self._world_time = self._world_time + timedelta(minutes=minutes_per_tick)
         self._step += 1
@@ -1351,7 +1357,9 @@ class SimulationEngine:
 
     def set_speed(self, multiplier: float) -> None:
         if self._simulation is not None:
-            self._simulation.speed_multiplier = multiplier
+            self._simulation.speed_multiplier = normalize_simulation_speed_multiplier(
+                multiplier
+            )
 
     def get_agent(self, agent_id: str) -> EngineAgent | None:
         return self._agents.get(agent_id)

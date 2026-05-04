@@ -28,6 +28,7 @@ from app.schemas.simulation import (
     SimulationState,
     SimulationStateDelta,
     WorldEvent as WorldEventSchema,
+    normalize_simulation_speed_multiplier,
 )
 
 logger = get_logger(__name__)
@@ -104,10 +105,12 @@ class SimulationRuntime:
             raise TargetNotFound("simulation row missing")
         db_sim.world_tick_hz = request.world_tick_hz
         db_sim.ai_tick_minutes = request.ai_tick_minutes
-        db_sim.speed_multiplier = request.speed_multiplier
+        db_sim.speed_multiplier = normalize_simulation_speed_multiplier(
+            request.speed_multiplier
+        )
         db_sim.status = "running"
         await session.commit()
-        self.engine.set_speed(request.speed_multiplier)
+        self.engine.set_speed(db_sim.speed_multiplier)
         self.engine.set_status("running")
         return Simulation.model_validate(db_sim)
 
@@ -128,9 +131,10 @@ class SimulationRuntime:
             db_sim = await session.get(SimulationORM, sim.id)
             if db_sim is None:
                 raise TargetNotFound("simulation row missing")
-            db_sim.speed_multiplier = multiplier
+            clamped = normalize_simulation_speed_multiplier(multiplier)
+            db_sim.speed_multiplier = clamped
             await session.commit()
-            self.engine.set_speed(multiplier)
+            self.engine.set_speed(clamped)
             return Simulation.model_validate(db_sim)
 
     async def step_once(self, simulation_id: str) -> SimulationStateDelta:

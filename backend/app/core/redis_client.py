@@ -326,8 +326,8 @@ def key_agent_unreachable(agent_id: str) -> str:
 def key_agent_decision_lock(agent_id: str) -> str:
     """决策"进行中"锁：agent:{id}:decision_lock。
 
-    阶段 21+：22 NPC 每 ``ai_tick_minutes`` 仿真分钟（≈ 0.6 真实秒）就会触发一次
-    enqueue。SimpleWorker 时代单线程 LLM 调用 5-15s/次，导致同一 NPC 的 N 份
+    阶段 21+：22 NPC 每 ``ai_tick_minutes`` 仿真分钟（默认 3）÷ ``world_tick_hz``
+   （默认 2 ⇒ ≈1.5 真实秒）就可能触发一次 enqueue。SimpleWorker 时代单线程 LLM 调用 5-15s/次，导致同一 NPC 的 N 份
     决策任务在队列里堆积，超过 ``deadline_seconds`` 后批量被丢弃，玩家观感即
     "只有少数 NPC 在动"。
 

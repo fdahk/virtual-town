@@ -29,7 +29,7 @@ from app.llm.tools.base import Tool, ToolCall, ToolContext, ToolResult, ToolSpec
 logger = get_logger(__name__)
 
 
-# 真实秒：1 仿真分钟 ≈ 1 真实秒（5 Hz 默认 + speed=1，实际 1/5 秒）。
+# 真实秒粗算：1 仿真分钟跨越多长取决于 ``world_tick_hz×speed``（默认 2Hz×1 ⇒ 约 0.5 真实秒/仿真分）。
 # 为简化估算，busy_until 直接用游戏时间（world_time）+ minutes 设置。
 
 
