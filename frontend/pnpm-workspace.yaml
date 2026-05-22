@@ -1,0 +1,4 @@
+# pnpm v11：依赖自带的 install/build 脚本需显式放行，否则 vite 用到的 esbuild 无法安装二进制。
+# 文档：https://pnpm.io/pnpm-workspace_yaml
+allowBuilds:
+  esbuild: true
